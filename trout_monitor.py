@@ -1,6 +1,5 @@
 import os
 import re
-import hashlib
 from urllib.parse import urljoin
 import requests
 from bs4 import BeautifulSoup
@@ -11,7 +10,7 @@ TARGET_URL = "https://www.area-island.com/"
 LINE_CHANNEL_ACCESS_TOKEN = os.environ.get("LINE_CHANNEL_ACCESS_TOKEN", "")
 LINE_USER_ID = os.environ.get("LINE_USER_ID", "")
 
-# 画像が存在しない場合の予備画像（HTTPS対応）
+# 万が一画像が取得できない場合のフォールバック画像
 DEFAULT_IMAGE_URL = "https://images.unsplash.com/photo-1544551763-46a013bb70d5?w=600&auto=format&fit=crop"
 
 
@@ -33,52 +32,58 @@ def clean_url(base_url, rel_url):
     return full_url.rstrip('/')
 
 
-def clean_image_url(base_url, img_element):
-    """画像URLの抽出と検証"""
-    if not img_element:
-        return DEFAULT_IMAGE_URL
-    src = (
-        img_element.get('data-src') or 
-        img_element.get('data-original') or 
-        img_element.get('src')
-    )
-    if not src or 'blank.gif' in src or 'spacer.gif' in src:
-        return DEFAULT_IMAGE_URL
-    
-    full_img_url = urljoin(base_url, src)
-    # HTTPの場合はLINE側で拒否されるためHTTPSへ補正
-    if full_img_url.startswith("http://"):
-        full_img_url = full_img_url.replace("http://", "https://", 1)
-    return full_img_url
-
-
 def fetch_real_single_item():
-    """実際のWebサイトから最新の1件のみを抽出"""
+    """トップページからリンクを取得し、個別商品ページへジャンプして実際の画像を抽出"""
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
         page = browser.new_page()
+        
+        # 1. トップページへアクセス
         page.goto(TARGET_URL, wait_until="domcontentloaded", timeout=30000)
-        html_content = page.content()
+        soup = BeautifulSoup(page.content(), 'html.parser')
+        keywords = ['入荷', '再入荷', '新色', 'ご予約', '限定']
+
+        target_item = None
+        for a_tag in soup.find_all('a', href=True):
+            text = a_tag.get_text(strip=True)
+            if any(kw in text for kw in keywords) and len(text) > 3:
+                item_url = clean_url(TARGET_URL, a_tag['href'])
+                cleaned_title = clean_title(text)
+                target_item = {'title': cleaned_title, 'url': item_url}
+                break
+
+        if not target_item:
+            browser.close()
+            return None
+
+        # 2. 個別商品ページへ移動してメイン画像を抽出
+        img_url = DEFAULT_IMAGE_URL
+        try:
+            page.goto(target_item['url'], wait_until="domcontentloaded", timeout=30000)
+            detail_soup = BeautifulSoup(page.content(), 'html.parser')
+            
+            # 商品ページ内の画像からメイン写真を特定
+            for img in detail_soup.find_all('img', src=True):
+                src = img['src']
+                # バナー・ロゴ・ボタンなどの非商品画像を除外
+                if any(ex in src.lower() for ex in ['blank.gif', 'spacer.gif', 'logo', 'banner', 'btn', 'cart', 'header', 'footer']):
+                    continue
+                
+                full_img = urljoin(target_item['url'], src)
+                # LINE仕様に合わせてHTTPをHTTPSに補正
+                if full_img.startswith("http://"):
+                    full_img = full_img.replace("http://", "https://", 1)
+                
+                img_url = full_img
+                # アップロード画像や商品画像と思われるパスを最優先採用
+                if any(kw in src.lower() for kw in ['upload', 'save_image', 'goods', 'product']):
+                    break
+        except Exception as e:
+            print(f"詳細ページの画像解析中にエラーが発生しました: {e}")
+
         browser.close()
-
-    soup = BeautifulSoup(html_content, 'html.parser')
-    keywords = ['入荷', '再入荷', '新色', 'ご予約', '限定']
-
-    for a_tag in soup.find_all('a', href=True):
-        text = a_tag.get_text(strip=True)
-        if any(kw in text for kw in keywords) and len(text) > 3:
-            item_url = clean_url(TARGET_URL, a_tag['href'])
-            cleaned_title = clean_title(text)
-            img_tag = a_tag.find('img') or (a_tag.parent.find('img') if a_tag.parent else None)
-            img_url = clean_image_url(TARGET_URL, img_tag)
-
-            # 検出された最初の1件を返す
-            return {
-                'title': cleaned_title,
-                'url': item_url,
-                'image_url': img_url
-            }
-    return None
+        target_item['image_url'] = img_url
+        return target_item
 
 
 def create_flex_carousel(item):
@@ -126,7 +131,7 @@ def create_flex_carousel(item):
 
     return {
         "type": "flex",
-        "altText": f"【実データテスト】{item['title']}",
+        "altText": f"【実画像テスト】{item['title']}",
         "contents": {
             "type": "carousel",
             "contents": [bubble]
@@ -139,14 +144,13 @@ def main():
         print("エラー: LINEのアクセストークンまたはユーザーIDが設定されていません。")
         return
 
-    print("サイトから最新データの取得を開始します...")
+    print("サイトから最新データおよび商品画像の取得を開始します...")
     item = fetch_real_single_item()
 
     if not item:
-        print("エラー: サイトから有効な入荷情報を抽出できませんでした。")
+        print("エラー: 有効な商品情報が抽出できませんでした。")
         return
 
-    # 抽出されたデータの確認ログ出力
     print("\n--- 抽出成功データ ---")
     print(f"タイトル: {item['title']}")
     print(f"商品URL : {item['url']}")
@@ -166,7 +170,7 @@ def main():
 
     res = requests.post(url, headers=headers, json=payload, timeout=10)
     if res.status_code == 200:
-        print("LINEへ実データ（1件）の送信に成功しました。スマホのLINEをご確認ください。")
+        print("LINEへ最新の商品画像付き通知（1件）を送信しました。")
     else:
         print(f"LINE送信エラー: {res.status_code} - {res.text}")
 
