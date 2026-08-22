@@ -62,26 +62,12 @@ def classify_genre(text):
     return 'その他'
 
 
-def get_genre_config_by_title(title_text):
+def get_genre_config_by_key(genre_key):
     """ジャンルキーから配色設定を取得"""
-    genre_key = classify_genre(title_text)
     for g in GENRE_CONFIG:
         if g['key'] == genre_key:
             return g
     return DEFAULT_GENRE
-
-
-def get_full_line_text(a_tag):
-    """<a>タグとその前後のテキストノードを結合して完全な1行の文章を作成"""
-    prev_str = str(a_tag.previous_sibling) if a_tag.previous_sibling else ""
-    next_str = str(a_tag.next_sibling) if a_tag.next_sibling else ""
-    
-    prev_clean = re.sub(r'<[^>]+>', '', prev_str)
-    next_clean = re.sub(r'<[^>]+>', '', next_str)
-    a_clean = a_tag.get_text(strip=True)
-    
-    combined = f"{prev_clean} {a_clean} {next_clean}".strip()
-    return re.sub(r'\s+', ' ', combined)
 
 
 def fetch_real_genre_items():
@@ -100,24 +86,27 @@ def fetch_real_genre_items():
             if not href or href.startswith('javascript:'):
                 continue
 
-            full_line_text = get_full_line_text(a_tag)
-            
-            # バナーやお知らせ等、商品以外のリンクを除外
-            if len(full_line_text) <= 3 or 'トーナメント' in full_line_text or 'お届け遅延' in full_line_text:
+            # 親要素から行全体の文章を取得
+            parent = a_tag.parent
+            line_text = parent.get_text(" ", strip=True) if parent else ""
+            if len(line_text) > 200 or len(line_text) < 3:
+                line_text = a_tag.get_text(strip=True)
+
+            if len(line_text) <= 3 or 'トーナメント' in line_text or 'お届け遅延' in line_text:
                 continue
 
-            genre_key = classify_genre(full_line_text)
+            genre_key = classify_genre(line_text)
             if genre_key == 'その他':
                 continue
 
-            # 各ジャンルで最初の1件のみを抽出
+            # 未取得のジャンルであれば格納
             if genre_key not in found_items:
                 item_url = force_https_url(urljoin(TARGET_URL, href))
-                cleaned_title = clean_title(full_line_text)
+                cleaned_title = clean_title(line_text)
                 found_items[genre_key] = {
                     'genre_key': genre_key,
                     'title': cleaned_title,
-                    'raw_title': full_line_text,
+                    'raw_title': line_text,
                     'url': item_url
                 }
 
@@ -153,7 +142,7 @@ def create_flex_carousel(items):
     """5ジャンル別の色分けカルーセルを作成"""
     bubbles = []
     for item in items:
-        genre = get_genre_config_by_title(item['raw_title'])
+        genre = get_genre_config_by_key(item['genre_key'])
 
         bubble = {
             "type": "bubble",
@@ -207,7 +196,7 @@ def create_flex_carousel(items):
 
     return {
         "type": "flex",
-        "altText": f"【5ジャンル完全検証】新着更新（{len(items)}件）",
+        "altText": f"【5ジャンル全揃い検証】新着更新（{len(items)}件）",
         "contents": {
             "type": "carousel",
             "contents": bubbles
