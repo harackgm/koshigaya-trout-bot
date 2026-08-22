@@ -1,18 +1,25 @@
 import os
 import re
+import sqlite3
+import hashlib
 from urllib.parse import urljoin
 import requests
 from bs4 import BeautifulSoup
 from playwright.sync_api import sync_playwright
 
-# --- 設定項目 ---
+# --- 基本設定 ---
 TARGET_URL = "https://www.area-island.com/"
+DB_FILE = "shop_data.db"
+TABLE_NAME = "notified_items"
+
+# --- ガードレール設定（安全装置） ---
+MAX_NOTIFY_LIMIT = 5  # 1回の実行で未通知がこの件数を超えた場合、通知を全キャンセルしてDBのみ更新
+
 LINE_CHANNEL_ACCESS_TOKEN = os.environ.get("LINE_CHANNEL_ACCESS_TOKEN", "")
 LINE_USER_ID = os.environ.get("LINE_USER_ID", "")
-
 DEFAULT_IMAGE_URL = "https://images.unsplash.com/photo-1544551763-46a013bb70d5?w=600&auto=format&fit=crop"
 
-# 5ジャンルデザイン設定（優先度順）
+# 5ジャンルデザイン設定
 GENRE_CONFIG = [
     {'key': '予約', 'keywords': ['ご予約', '予約'], 'category': '【ご予約】', 'color': '#FF5722'},                # オレンジ
     {'key': '限定', 'keywords': ['期間限定', 'sale', 'セール'], 'category': '【期間限定】', 'color': '#8E24AA'}, # パープル
@@ -21,6 +28,33 @@ GENRE_CONFIG = [
     {'key': '入荷', 'keywords': ['入荷'], 'category': '【新着入荷】', 'color': '#1DB446'},              # グリーン
 ]
 DEFAULT_GENRE = {'category': '【新着更新】', 'color': '#607D8B'}
+
+
+def init_db():
+    """データベース初期化"""
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    cursor.execute(f"""
+        CREATE TABLE IF NOT EXISTS {TABLE_NAME} (
+            item_id TEXT PRIMARY KEY,
+            title TEXT,
+            url TEXT,
+            image_url TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    conn.commit()
+    conn.close()
+
+
+def is_db_empty():
+    """DBが空（初回実行）判定"""
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    cursor.execute(f"SELECT COUNT(*) FROM {TABLE_NAME}")
+    count = cursor.fetchone()[0]
+    conn.close()
+    return count == 0
 
 
 def clean_title(title_text):
@@ -47,7 +81,7 @@ def force_https_url(url):
 
 
 def classify_genre(text):
-    """文字列から5ジャンルを優先度順に厳密判定"""
+    """文字列から5ジャンルを優先度順に判定"""
     text_lower = text.lower()
     if '予約' in text_lower:
         return '予約'
@@ -101,10 +135,9 @@ def get_line_for_a_tag(a_tag):
     return a_tag.get_text(strip=True)
 
 
-def fetch_real_genre_items():
-    """行ブロック解析により5ジャンルすべての実商品を100%正確に抽出"""
-    found_items = {}
-
+def fetch_site_items():
+    """Webサイトから全入荷情報を抽出し、各商品詳細ページから本物の画像を特定"""
+    items = []
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
         page = browser.new_page()
@@ -112,12 +145,12 @@ def fetch_real_genre_items():
         page.goto(TARGET_URL, wait_until="domcontentloaded", timeout=30000)
         soup = BeautifulSoup(page.content(), 'html.parser')
 
+        raw_items = []
         for a_tag in soup.find_all('a', href=True):
             href = a_tag['href']
             if not href or href.startswith('javascript:'):
                 continue
 
-            # <br>区切りの1行完全テキストを取得
             line_text = get_line_for_a_tag(a_tag)
 
             if len(line_text) <= 3 or 'トーナメント' in line_text or 'お届け遅延' in line_text:
@@ -127,23 +160,21 @@ def fetch_real_genre_items():
             if genre_key == 'その他':
                 continue
 
-            # 未取得のジャンルであれば格納
-            if genre_key not in found_items:
-                item_url = force_https_url(urljoin(TARGET_URL, href))
-                cleaned_title = clean_title(line_text)
-                found_items[genre_key] = {
+            item_url = force_https_url(urljoin(TARGET_URL, href))
+            cleaned_title = clean_title(line_text)
+            item_id = hashlib.md5(f"{item_url}_{cleaned_title}".encode('utf-8')).hexdigest()
+
+            if not any(i['item_id'] == item_id for i in raw_items):
+                raw_items.append({
+                    'item_id': item_id,
                     'genre_key': genre_key,
                     'title': cleaned_title,
                     'raw_title': line_text,
                     'url': item_url
-                }
-
-            if len(found_items) >= 5:
-                break
+                })
 
         # 各商品の詳細ページへ移動し本物の画像を抽出
-        items_list = list(found_items.values())
-        for item in items_list:
+        for item in raw_items:
             img_url = DEFAULT_IMAGE_URL
             try:
                 page.goto(item['url'], wait_until="domcontentloaded", timeout=20000)
@@ -161,15 +192,16 @@ def fetch_real_genre_items():
                 print(f"詳細ページの画像解析エラー ({item['url']}): {e}")
 
             item['image_url'] = force_https_url(img_url)
+            items.append(item)
 
         browser.close()
-    return items_list
+    return items
 
 
-def create_flex_carousel(items):
-    """5ジャンル別の色分けカルーセルを作成"""
+def create_flex_carousel(items_chunk):
+    """LINE Flex Message Carousel (最大10件/メッセージ) の構築"""
     bubbles = []
-    for item in items:
+    for item in items_chunk:
         genre = get_genre_config_by_key(item['genre_key'])
 
         bubble = {
@@ -224,7 +256,7 @@ def create_flex_carousel(items):
 
     return {
         "type": "flex",
-        "altText": f"【5ジャンル完全検証】新着更新（{len(items)}件）",
+        "altText": f"【越谷トラウトアイランド】新着更新（{len(items_chunk)}件）",
         "contents": {
             "type": "carousel",
             "contents": bubbles
@@ -232,24 +264,11 @@ def create_flex_carousel(items):
     }
 
 
-def main():
+def send_line_flex_messages(items):
+    """LINE API経由で10件単位にパッキングして送信"""
     if not LINE_CHANNEL_ACCESS_TOKEN or not LINE_USER_ID:
         print("エラー: LINEのアクセス情報が設定されていません。")
-        return
-
-    print("サイトから5ジャンルすべての実商品データを取得中...")
-    items = fetch_real_genre_items()
-
-    if not items:
-        print("有効な商品情報が取得できませんでした。")
-        return
-
-    print(f"\n--- 抽出成功データ ({len(items)}件) ---")
-    for item in items:
-        print(f"[{item['genre_key']}] {item['title']}")
-        print(f"  URL: {item['url']}")
-        print(f"  IMG: {item['image_url']}")
-    print("------------------------------------\n")
+        return False
 
     url = "https://api.line.me/v2/bot/message/push"
     headers = {
@@ -257,16 +276,72 @@ def main():
         "Authorization": f"Bearer {LINE_CHANNEL_ACCESS_TOKEN}"
     }
 
-    payload = {
-        "to": LINE_USER_ID,
-        "messages": [create_flex_carousel(items)]
-    }
+    chunks = [items[i:i + 10] for i in range(0, len(items), 10)]
+    for chunk in chunks:
+        payload = {
+            "to": LINE_USER_ID,
+            "messages": [create_flex_carousel(chunk)]
+        }
+        res = requests.post(url, headers=headers, json=payload, timeout=10)
+        if res.status_code != 200:
+            print(f"LINE送信エラー: {res.status_code} - {res.text}")
+            return False
+    return True
 
-    res = requests.post(url, headers=headers, json=payload, timeout=10)
-    if res.status_code == 200:
-        print("LINEへ5ジャンル分の色分けテスト通知を送信しました。")
-    else:
-        print(f"LINE送信エラー: {res.status_code} - {res.text}")
+
+def save_items(items):
+    """アイテムを既読としてDB保存"""
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    for item in items:
+        cursor.execute(f"""
+            INSERT OR IGNORE INTO {TABLE_NAME} (item_id, title, url, image_url)
+            VALUES (?, ?, ?, ?)
+        """, (item['item_id'], item['title'], item['url'], item['image_url']))
+    conn.commit()
+    conn.close()
+
+
+def main():
+    init_db()
+    first_run = is_db_empty()
+
+    current_items = fetch_site_items()
+    if not current_items:
+        print("有効な入荷情報が検出されませんでした。")
+        return
+
+    # ガードレール 1: 初回起動時は全件DB化し通知を自動スキップ（大量通知防止）
+    if first_run:
+        save_items(current_items)
+        print("【初回起動検出】現在の入荷情報をDBに初期登録しました（LINE通知は送信されません）。")
+        return
+
+    # 未通知アイテムの抽出
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    new_items = []
+    for item in current_items:
+        cursor.execute(f"SELECT 1 FROM {TABLE_NAME} WHERE item_id = ?", (item['item_id'],))
+        if not cursor.fetchone():
+            new_items.append(item)
+    conn.close()
+
+    if not new_items:
+        print("新しい更新はありません。")
+        return
+
+    # ガードレール 2: 大量通知ストッパー（MAX_LIMIT超過時の自動抑止）
+    if len(new_items) > MAX_NOTIFY_LIMIT:
+        print(f"【大量通知ストッパー作動】{len(new_items)}件の未通知情報を検出。")
+        print(f"設定上限（{MAX_NOTIFY_LIMIT}件）を超えたため、LINE通知をキャンセルしてDBのみ更新します。")
+        save_items(new_items)
+        return
+
+    # 通常通知処理
+    if send_line_flex_messages(new_items):
+        save_items(new_items)
+        print(f"{len(new_items)}件の新着入荷情報をLINEに送信しました。")
 
 
 if __name__ == "__main__":
