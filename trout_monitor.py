@@ -14,7 +14,7 @@ DEFAULT_IMAGE_URL = "https://images.unsplash.com/photo-1544551763-46a013bb70d5?w
 
 # 5ジャンルデザイン設定
 GENRE_CONFIG = [
-    {'key': '予約', 'keywords': ['予約'], 'category': '【ご予約】', 'color': '#FF5722'},                # オレンジ
+    {'key': '予約', 'keywords': ['ご予約', '予約'], 'category': '【ご予約】', 'color': '#FF5722'},                # オレンジ
     {'key': '限定', 'keywords': ['期間限定', 'sale', 'セール'], 'category': '【期間限定】', 'color': '#8E24AA'}, # パープル
     {'key': '新色', 'keywords': ['新色'], 'category': '【新色入荷】', 'color': '#EC407A'},              # ピンク
     {'key': '再入荷', 'keywords': ['再入荷'], 'category': '【再入荷】', 'color': '#1E88E5'},              # ブルー
@@ -24,7 +24,7 @@ DEFAULT_GENRE = {'category': '【新着更新】', 'color': '#607D8B'}
 
 
 def clean_title(title_text):
-    """タイトルのクレンジング（日付やタグの除去）"""
+    """タイトルのクレンジング（日付や不要タグの除去）"""
     if not title_text:
         return "新着入荷商品"
     text = re.sub(r'^\d{1,2}/\d{1,2}\s*', '', title_text)
@@ -34,13 +34,15 @@ def clean_title(title_text):
     return text[:100]
 
 
-def clean_url(base_url, rel_url):
-    """URLの絶対パス化およびHTTPS自動補正（LINE URIエラー防止）"""
-    if not rel_url:
-        return base_url
-    full_url = urljoin(base_url, rel_url).rstrip('/')
+def force_https_url(url):
+    """すべてのURLをLINE API規格（HTTPS）に安全強制変換"""
+    if not url:
+        return TARGET_URL
+    full_url = url.strip()
     if full_url.startswith("http://"):
-        full_url = full_url.replace("http://", "https://", 1)
+        return full_url.replace("http://", "https://", 1)
+    if not full_url.startswith("http"):
+        return urljoin("https://www.area-island.com/", full_url)
     return full_url
 
 
@@ -70,14 +72,13 @@ def get_genre_config_by_title(title_text):
 
 
 def fetch_real_genre_items():
-    """行全体のテキストを取得し、5ジャンルすべての実商品・実URL・実画像を抽出"""
+    """実商品データを安全抽出し、5ジャンルを取得"""
     found_items = {}
     
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
         page = browser.new_page()
         
-        # 1. トップページ取得
         page.goto(TARGET_URL, wait_until="domcontentloaded", timeout=30000)
         soup = BeautifulSoup(page.content(), 'html.parser')
         
@@ -88,10 +89,15 @@ def fetch_real_genre_items():
             if len(full_line_text) <= 3:
                 continue
             
+            # 非商品リンク（トーナメント案内バナーなど）をフィルタリング
+            href = a_tag['href']
+            if 'gid=' in href and ('トーナメント' in full_line_text or 'お知らせ' in full_line_text):
+                continue
+
             genre_key = classify_genre(full_line_text)
             
             if genre_key != 'その他' and genre_key not in found_items:
-                item_url = clean_url(TARGET_URL, a_tag['href'])
+                item_url = force_https_url(urljoin(TARGET_URL, href))
                 cleaned_title = clean_title(full_line_text)
                 found_items[genre_key] = {
                     'genre_key': genre_key,
@@ -103,7 +109,7 @@ def fetch_real_genre_items():
             if len(found_items) >= 5:
                 break
                 
-        # 2. 各商品の詳細ページから本物の画像を抽出
+        # 各商品の詳細ページから本物の画像を抽出
         items_list = list(found_items.values())
         for item in items_list:
             img_url = DEFAULT_IMAGE_URL
@@ -116,17 +122,13 @@ def fetch_real_genre_items():
                     if any(ex in src.lower() for ex in ['blank.gif', 'spacer.gif', 'logo', 'banner', 'btn', 'cart', 'header', 'footer']):
                         continue
                     
-                    full_img = urljoin(item['url'], src)
-                    if full_img.startswith("http://"):
-                        full_img = full_img.replace("http://", "https://", 1)
-                    
-                    img_url = full_img
+                    img_url = force_https_url(urljoin(item['url'], src))
                     if any(kw in src.lower() for kw in ['upload', 'save_image', 'goods', 'product']):
                         break
             except Exception as e:
                 print(f"詳細ページの画像解析エラー ({item['url']}): {e}")
 
-            item['image_url'] = img_url
+            item['image_url'] = force_https_url(img_url)
 
         browser.close()
     return items_list
@@ -137,12 +139,14 @@ def create_flex_carousel(items):
     bubbles = []
     for item in items:
         genre = get_genre_config_by_title(item['raw_title'])
+        safe_url = force_https_url(item['url'])
+        safe_img_url = force_https_url(item['image_url'])
 
         bubble = {
             "type": "bubble",
             "hero": {
                 "type": "image",
-                "url": item['image_url'],
+                "url": safe_img_url,
                 "size": "full",
                 "aspectRatio": "20:13",
                 "aspectMode": "cover"
@@ -178,7 +182,7 @@ def create_flex_carousel(items):
                         "action": {
                             "type": "uri",
                             "label": "商品詳細を見る",
-                            "uri": item['url']
+                            "uri": safe_url
                         },
                         "style": "primary",
                         "color": genre['color']
@@ -190,7 +194,7 @@ def create_flex_carousel(items):
 
     return {
         "type": "flex",
-        "altText": f"【全5ジャンルテスト】新着更新（{len(items)}件）",
+        "altText": f"【全5ジャンル修正テスト】新着更新（{len(items)}件）",
         "contents": {
             "type": "carousel",
             "contents": bubbles
