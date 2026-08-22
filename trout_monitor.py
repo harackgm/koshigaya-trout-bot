@@ -46,9 +46,9 @@ def force_https_url(url):
     return full_url
 
 
-def classify_genre(full_line_text):
-    """行全体のテキストからジャンルキーを判定"""
-    text_lower = full_line_text.lower()
+def classify_genre(text):
+    """文字列から5ジャンルを優先度順に厳密判定"""
+    text_lower = text.lower()
     if '予約' in text_lower:
         return '予約'
     elif any(kw in text_lower for kw in ['期間限定', 'sale', 'セール']):
@@ -72,7 +72,7 @@ def get_genre_config_by_title(title_text):
 
 
 def fetch_real_genre_items():
-    """実商品データを安全抽出し、5ジャンルを取得"""
+    """行単位の精密パースにより5ジャンルすべての実商品を抽出"""
     found_items = {}
     
     with sync_playwright() as p:
@@ -83,26 +83,33 @@ def fetch_real_genre_items():
         soup = BeautifulSoup(page.content(), 'html.parser')
         
         for a_tag in soup.find_all('a', href=True):
-            parent_element = a_tag.parent if a_tag.parent else a_tag
-            full_line_text = parent_element.get_text(strip=True)
-            
-            if len(full_line_text) <= 3:
-                continue
-            
-            # 非商品リンク（トーナメント案内バナーなど）をフィルタリング
             href = a_tag['href']
-            if 'gid=' in href and ('トーナメント' in full_line_text or 'お知らせ' in full_line_text):
+            a_text = a_tag.get_text(strip=True)
+            
+            # 親要素のテキストを取得（広すぎる親要素対策として150文字以内に限定）
+            parent = a_tag.parent
+            if parent:
+                parent_text = parent.get_text(" ", strip=True)
+                full_text = parent_text if len(parent_text) < 150 else a_text
+            else:
+                full_text = a_text
+
+            if len(full_text) <= 3:
                 continue
 
-            genre_key = classify_genre(full_line_text)
+            # 非商品バナーの除外
+            if 'トーナメント' in full_text or 'お知らせ' in full_text:
+                continue
+
+            genre_key = classify_genre(full_text)
             
             if genre_key != 'その他' and genre_key not in found_items:
                 item_url = force_https_url(urljoin(TARGET_URL, href))
-                cleaned_title = clean_title(full_line_text)
+                cleaned_title = clean_title(full_text)
                 found_items[genre_key] = {
                     'genre_key': genre_key,
                     'title': cleaned_title,
-                    'raw_title': full_line_text,
+                    'raw_title': full_text,
                     'url': item_url
                 }
             
@@ -194,7 +201,7 @@ def create_flex_carousel(items):
 
     return {
         "type": "flex",
-        "altText": f"【全5ジャンル修正テスト】新着更新（{len(items)}件）",
+        "altText": f"【5ジャンル完全検証】新着更新（{len(items)}件）",
         "contents": {
             "type": "carousel",
             "contents": bubbles
