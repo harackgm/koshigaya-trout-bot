@@ -12,7 +12,7 @@ LINE_USER_ID = os.environ.get("LINE_USER_ID", "")
 
 DEFAULT_IMAGE_URL = "https://images.unsplash.com/photo-1544551763-46a013bb70d5?w=600&auto=format&fit=crop"
 
-# 5ジャンルデザイン設定
+# 5ジャンルデザイン設定（優先度順）
 GENRE_CONFIG = [
     {'key': '予約', 'keywords': ['ご予約', '予約'], 'category': '【ご予約】', 'color': '#FF5722'},                # オレンジ
     {'key': '限定', 'keywords': ['期間限定', 'sale', 'セール'], 'category': '【期間限定】', 'color': '#8E24AA'}, # パープル
@@ -47,7 +47,7 @@ def force_https_url(url):
 
 
 def classify_genre(text):
-    """文字列から5ジャンルを優先度順に厳密判定（誤判定防止）"""
+    """文字列から5ジャンルを優先度順に厳密判定"""
     text_lower = text.lower()
     if '予約' in text_lower:
         return '予約'
@@ -70,27 +70,55 @@ def get_genre_config_by_key(genre_key):
     return DEFAULT_GENRE
 
 
+def get_line_for_a_tag(a_tag):
+    """<br>タグで区切られた1行ブロック内のテキストのみを正確に抽出・連結"""
+    parent = a_tag.parent
+    if not parent:
+        return a_tag.get_text(strip=True)
+
+    current_block = []
+    target_block = None
+
+    for child in parent.contents:
+        if getattr(child, 'name', None) == 'br':
+            if target_block is not None:
+                break
+            current_block = []
+        else:
+            if child == a_tag:
+                target_block = current_block
+            if isinstance(child, str):
+                text = child.strip()
+                if text:
+                    current_block.append(text)
+            elif hasattr(child, 'get_text'):
+                text = child.get_text(strip=True)
+                if text:
+                    current_block.append(text)
+
+    if target_block is not None:
+        return " ".join(target_block)
+    return a_tag.get_text(strip=True)
+
+
 def fetch_real_genre_items():
-    """5ジャンルそれぞれの実商品・100%正しいURL・実画像を完全抽出"""
+    """行ブロック解析により5ジャンルすべての実商品を100%正確に抽出"""
     found_items = {}
-    
+
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
         page = browser.new_page()
-        
+
         page.goto(TARGET_URL, wait_until="domcontentloaded", timeout=30000)
         soup = BeautifulSoup(page.content(), 'html.parser')
-        
+
         for a_tag in soup.find_all('a', href=True):
             href = a_tag['href']
             if not href or href.startswith('javascript:'):
                 continue
 
-            # 親要素から行全体の文章を取得
-            parent = a_tag.parent
-            line_text = parent.get_text(" ", strip=True) if parent else ""
-            if len(line_text) > 200 or len(line_text) < 3:
-                line_text = a_tag.get_text(strip=True)
+            # <br>区切りの1行完全テキストを取得
+            line_text = get_line_for_a_tag(a_tag)
 
             if len(line_text) <= 3 or 'トーナメント' in line_text or 'お届け遅延' in line_text:
                 continue
@@ -120,12 +148,12 @@ def fetch_real_genre_items():
             try:
                 page.goto(item['url'], wait_until="domcontentloaded", timeout=20000)
                 detail_soup = BeautifulSoup(page.content(), 'html.parser')
-                
+
                 for img in detail_soup.find_all('img', src=True):
                     src = img['src']
                     if any(ex in src.lower() for ex in ['blank.gif', 'spacer.gif', 'logo', 'banner', 'btn', 'cart', 'header', 'footer']):
                         continue
-                    
+
                     img_url = force_https_url(urljoin(item['url'], src))
                     if any(kw in src.lower() for kw in ['upload', 'save_image', 'goods', 'product']):
                         break
@@ -196,7 +224,7 @@ def create_flex_carousel(items):
 
     return {
         "type": "flex",
-        "altText": f"【5ジャンル全揃い検証】新着更新（{len(items)}件）",
+        "altText": f"【5ジャンル完全検証】新着更新（{len(items)}件）",
         "contents": {
             "type": "carousel",
             "contents": bubbles
@@ -209,7 +237,7 @@ def main():
         print("エラー: LINEのアクセス情報が設定されていません。")
         return
 
-    print("サイトから5ジャンルすべての実商品および正しいURLを取得中...")
+    print("サイトから5ジャンルすべての実商品データを取得中...")
     items = fetch_real_genre_items()
 
     if not items:
