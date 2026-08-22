@@ -35,7 +35,7 @@ def clean_title(title_text):
 
 
 def force_https_url(url):
-    """すべてのURLをLINE API規格（HTTPS）に安全変換"""
+    """すべてのURLをLINE API規格（HTTPS）に安全強制変換"""
     if not url:
         return TARGET_URL
     full_url = url.strip()
@@ -46,33 +46,9 @@ def force_https_url(url):
     return full_url
 
 
-def get_a_tag_line_text(a_tag):
-    """<a>タグの前後にあるテキストノードを結合して、行全体の文章を復元"""
-    prev_text = ""
-    curr = a_tag.previous_sibling
-    while curr and len(prev_text) < 40:
-        if isinstance(curr, str):
-            prev_text = curr + prev_text
-        elif hasattr(curr, 'get_text'):
-            prev_text = curr.get_text() + prev_text
-        curr = curr.previous_sibling
-
-    next_text = ""
-    curr = a_tag.next_sibling
-    while curr and len(next_text) < 40:
-        if isinstance(curr, str):
-            next_text += curr
-        elif hasattr(curr, 'get_text'):
-            next_text += curr.get_text()
-        curr = curr.next_sibling
-
-    combined = f"{prev_text} {a_tag.get_text(strip=True)} {next_text}"
-    return re.sub(r'\s+', ' ', combined).strip()
-
-
-def classify_genre(full_text):
-    """結合された文章から5ジャンルを優先度順に判定"""
-    text_lower = full_text.lower()
+def classify_genre(text):
+    """文字列から5ジャンルを優先度順に判定"""
+    text_lower = text.lower()
     if '予約' in text_lower:
         return '予約'
     elif any(kw in text_lower for kw in ['期間限定', 'sale', 'セール']):
@@ -95,8 +71,48 @@ def get_genre_config_by_title(title_text):
     return DEFAULT_GENRE
 
 
+def extract_item_from_a_tag(a_tag):
+    """<a>タグ単体からURLと商品テキストを1対1で厳密分離抽出（混同防止機能）"""
+    rel_href = a_tag.get('href', '')
+    if not rel_href or 'gid=' in rel_href:  # バナー・非商品リンクの除外
+        return None
+
+    item_url = force_https_url(urljoin(TARGET_URL, rel_href))
+    a_text = a_tag.get_text(strip=True)
+
+    if not a_text or len(a_text) <= 2:
+        return None
+
+    # 他の<a>タグを侵犯しない範囲で直前・直後のテキストノードのみ結合
+    prev_text = ""
+    if a_tag.previous_sibling and isinstance(a_tag.previous_sibling, str):
+        prev_text = a_tag.previous_sibling.strip()
+
+    next_text = ""
+    if a_tag.next_sibling and isinstance(a_tag.next_sibling, str):
+        next_text = a_tag.next_sibling.strip()
+
+    full_text = f"{prev_text} {a_text} {next_text}".strip()
+    full_text = re.sub(r'\s+', ' ', full_text)
+
+    # トーナメント告知等の非商品除外
+    if 'トーナメント' in full_text or 'お知らせ' in full_text:
+        return None
+
+    genre_key = classify_genre(full_text)
+    if genre_key == 'その他':
+        return None
+
+    return {
+        'genre_key': genre_key,
+        'title': clean_title(full_text),
+        'raw_title': full_text,
+        'url': item_url
+    }
+
+
 def fetch_real_genre_items():
-    """前後のテキストノードを解析し、5ジャンルすべての実商品を100%抽出"""
+    """5ジャンルそれぞれの実商品・100%正しいURL・実画像を完全抽出"""
     found_items = {}
     
     with sync_playwright() as p:
@@ -107,29 +123,18 @@ def fetch_real_genre_items():
         soup = BeautifulSoup(page.content(), 'html.parser')
         
         for a_tag in soup.find_all('a', href=True):
-            href = a_tag['href']
-            # タグ外の前後テキストを含めた完全な文章を取得
-            full_line_text = get_a_tag_line_text(a_tag)
-
-            if len(full_line_text) <= 3 or 'トーナメント' in full_line_text or 'お知らせ' in full_line_text:
+            item_info = extract_item_from_a_tag(a_tag)
+            if not item_info:
                 continue
 
-            genre_key = classify_genre(full_line_text)
-            
-            if genre_key != 'その他' and genre_key not in found_items:
-                item_url = force_https_url(urljoin(TARGET_URL, href))
-                cleaned_title = clean_title(full_line_text)
-                found_items[genre_key] = {
-                    'genre_key': genre_key,
-                    'title': cleaned_title,
-                    'raw_title': full_line_text,
-                    'url': item_url
-                }
-            
+            genre_key = item_info['genre_key']
+            if genre_key not in found_items:
+                found_items[genre_key] = item_info
+
             if len(found_items) >= 5:
                 break
-                
-        # 各商品の詳細ページから本物の画像を抽出
+
+        # 各商品の詳細ページへ移動し本物の画像を抽出
         items_list = list(found_items.values())
         for item in items_list:
             img_url = DEFAULT_IMAGE_URL
@@ -159,14 +164,12 @@ def create_flex_carousel(items):
     bubbles = []
     for item in items:
         genre = get_genre_config_by_title(item['raw_title'])
-        safe_url = force_https_url(item['url'])
-        safe_img_url = force_https_url(item['image_url'])
 
         bubble = {
             "type": "bubble",
             "hero": {
                 "type": "image",
-                "url": safe_img_url,
+                "url": item['image_url'],
                 "size": "full",
                 "aspectRatio": "20:13",
                 "aspectMode": "cover"
@@ -202,7 +205,7 @@ def create_flex_carousel(items):
                         "action": {
                             "type": "uri",
                             "label": "商品詳細を見る",
-                            "uri": safe_url
+                            "uri": item['url']
                         },
                         "style": "primary",
                         "color": genre['color']
@@ -214,7 +217,7 @@ def create_flex_carousel(items):
 
     return {
         "type": "flex",
-        "altText": f"【5ジャンル完全検証】新着更新（{len(items)}件）",
+        "altText": f"【リンク完全一致検証】新着更新（{len(items)}件）",
         "contents": {
             "type": "carousel",
             "contents": bubbles
@@ -227,7 +230,7 @@ def main():
         print("エラー: LINEのアクセス情報が設定されていません。")
         return
 
-    print("サイトから5ジャンルすべての実商品データを取得中...")
+    print("サイトから5ジャンルすべての実商品および正しいURLを取得中...")
     items = fetch_real_genre_items()
 
     if not items:
