@@ -1,0 +1,49 @@
+name: Trout Island Monitor Bot
+
+on:
+  schedule:
+    - cron: '*/30 * * * *'  # 30分ごとに自動実行
+  workflow_dispatch:        # 手動実行ボタンを有効化
+
+jobs:
+  monitor:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      # キャッシュ復元ステップ (restore)
+      - name: Restore SQLite DB Cache
+        id: db-cache-restore
+        uses: actions/cache/restore@v4
+        with:
+          path: shop_data.db
+          key: trout-db-${{ runner.os }}-${{ github.run_id }}
+          restore-keys: |
+            trout-db-${{ runner.os }}-
+
+      - name: Install Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install requests beautifulsoup4 playwright
+          playwright install chromium --with-deps
+
+      - name: Run Monitoring Script
+        env:
+          LINE_CHANNEL_ACCESS_TOKEN: ${{ secrets.LINE_CHANNEL_ACCESS_TOKEN }}
+          LINE_USER_ID: ${{ secrets.LINE_USER_ID }}
+        run: python trout_monitor.py
+
+      # キャッシュ保存ステップ (save / 常に実行してDB消滅を防止)
+      - name: Save SQLite DB Cache
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: shop_data.db
+          key: trout-db-${{ runner.os }}-${{ github.run_id }}
