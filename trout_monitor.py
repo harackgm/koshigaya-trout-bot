@@ -24,10 +24,11 @@ DEFAULT_GENRE = {'category': '【新着更新】', 'color': '#607D8B'}
 
 
 def clean_title(title_text):
-    """タイトルのクレンジング"""
+    """タイトルのクレンジング（日付やタグの除去）"""
     if not title_text:
         return "新着入荷商品"
-    text = re.sub(r'<[^>]+>', '', title_text)
+    text = re.sub(r'^\d{1,2}/\d{1,2}\s*', '', title_text)  # 冒頭の日付(例: 8/20)を除去
+    text = re.sub(r'<[^>]+>', '', text)
     text = re.sub(r'\[(New Arrivals|再入荷|新色|ご予約|NEW)\]', '', text, flags=re.IGNORECASE)
     text = re.sub(r'\s+', ' ', text).strip()
     return text[:100]
@@ -41,18 +42,18 @@ def clean_url(base_url, rel_url):
     return full_url.rstrip('/')
 
 
-def classify_genre(title_text):
-    """タイトルからジャンルキーを判定"""
-    title_lower = title_text.lower()
-    if '予約' in title_lower:
+def classify_genre(full_line_text):
+    """行全体のテキストからジャンルキーを判定"""
+    text_lower = full_line_text.lower()
+    if '予約' in text_lower:
         return '予約'
-    elif any(kw in title_lower for kw in ['期間限定', 'sale', 'セール']):
+    elif any(kw in text_lower for kw in ['期間限定', 'sale', 'セール']):
         return '限定'
-    elif '新色' in title_lower:
+    elif '新色' in text_lower:
         return '新色'
-    elif '再入荷' in title_lower:
+    elif '再入荷' in text_lower:
         return '再入荷'
-    elif '入荷' in title_lower:
+    elif '入荷' in text_lower:
         return '入荷'
     return 'その他'
 
@@ -67,7 +68,7 @@ def get_genre_config_by_title(title_text):
 
 
 def fetch_real_genre_items():
-    """サイトから5ジャンルそれぞれの実商品・実URL・実画像を自動抽出"""
+    """行全体のテキストを取得し、5ジャンルすべての実商品・実URL・実画像を抽出"""
     found_items = {}
     
     with sync_playwright() as p:
@@ -79,18 +80,22 @@ def fetch_real_genre_items():
         soup = BeautifulSoup(page.content(), 'html.parser')
         
         for a_tag in soup.find_all('a', href=True):
-            text = a_tag.get_text(strip=True)
-            if len(text) <= 3:
+            # リンクの親要素（行全体）からテキストを取得し「再入荷」「新色」等の文字を確実に取得
+            parent_element = a_tag.parent if a_tag.parent else a_tag
+            full_line_text = parent_element.get_text(strip=True)
+            
+            if len(full_line_text) <= 3:
                 continue
             
-            genre_key = classify_genre(text)
+            genre_key = classify_genre(full_line_text)
+            
             if genre_key != 'その他' and genre_key not in found_items:
                 item_url = clean_url(TARGET_URL, a_tag['href'])
-                cleaned_title = clean_title(text)
+                cleaned_title = clean_title(full_line_text)
                 found_items[genre_key] = {
                     'genre_key': genre_key,
                     'title': cleaned_title,
-                    'raw_title': text,
+                    'raw_title': full_line_text,
                     'url': item_url
                 }
             
@@ -184,7 +189,7 @@ def create_flex_carousel(items):
 
     return {
         "type": "flex",
-        "altText": f"【リアルデータ5色テスト】新着更新（{len(items)}件）",
+        "altText": f"【全5ジャンル修正テスト】新着更新（{len(items)}件）",
         "contents": {
             "type": "carousel",
             "contents": bubbles
@@ -197,7 +202,7 @@ def main():
         print("エラー: LINEのアクセス情報が設定されていません。")
         return
 
-    print("サイトから各ジャンルのリアルな掲載商品と画像を自動取得中...")
+    print("サイトから5ジャンルすべての実商品データを取得中...")
     items = fetch_real_genre_items()
 
     if not items:
@@ -224,7 +229,7 @@ def main():
 
     res = requests.post(url, headers=headers, json=payload, timeout=10)
     if res.status_code == 200:
-        print("LINEへリアルデータ＆実画像での5色テスト通知を送信しました。")
+        print("LINEへ5ジャンル分の色分けテスト通知を送信しました。")
     else:
         print(f"LINE送信エラー: {res.status_code} - {res.text}")
 
