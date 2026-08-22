@@ -27,7 +27,7 @@ def clean_title(title_text):
     """タイトルのクレンジング（日付やタグの除去）"""
     if not title_text:
         return "新着入荷商品"
-    text = re.sub(r'^\d{1,2}/\d{1,2}\s*', '', title_text)  # 冒頭の日付(例: 8/20)を除去
+    text = re.sub(r'^\d{1,2}/\d{1,2}\s*', '', title_text)
     text = re.sub(r'<[^>]+>', '', text)
     text = re.sub(r'\[(New Arrivals|再入荷|新色|ご予約|NEW)\]', '', text, flags=re.IGNORECASE)
     text = re.sub(r'\s+', ' ', text).strip()
@@ -35,11 +35,13 @@ def clean_title(title_text):
 
 
 def clean_url(base_url, rel_url):
-    """URLの絶対パス化と正規化"""
+    """URLの絶対パス化およびHTTPS自動補正（LINE URIエラー防止）"""
     if not rel_url:
         return base_url
-    full_url = urljoin(base_url, rel_url)
-    return full_url.rstrip('/')
+    full_url = urljoin(base_url, rel_url).rstrip('/')
+    if full_url.startswith("http://"):
+        full_url = full_url.replace("http://", "https://", 1)
+    return full_url
 
 
 def classify_genre(full_line_text):
@@ -80,7 +82,6 @@ def fetch_real_genre_items():
         soup = BeautifulSoup(page.content(), 'html.parser')
         
         for a_tag in soup.find_all('a', href=True):
-            # リンクの親要素（行全体）からテキストを取得し「再入荷」「新色」等の文字を確実に取得
             parent_element = a_tag.parent if a_tag.parent else a_tag
             full_line_text = parent_element.get_text(strip=True)
             
@@ -189,7 +190,7 @@ def create_flex_carousel(items):
 
     return {
         "type": "flex",
-        "altText": f"【全5ジャンル修正テスト】新着更新（{len(items)}件）",
+        "altText": f"【全5ジャンルテスト】新着更新（{len(items)}件）",
         "contents": {
             "type": "carousel",
             "contents": bubbles
