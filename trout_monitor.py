@@ -104,35 +104,43 @@ def get_genre_config_by_key(genre_key):
     return DEFAULT_GENRE
 
 
-def get_line_for_a_tag(a_tag):
-    """<br>タグで区切られた1行ブロック内のテキストのみを正確に抽出・連結"""
-    parent = a_tag.parent
-    if not parent:
-        return a_tag.get_text(strip=True)
-
-    current_block = []
-    target_block = None
-
-    for child in parent.contents:
-        if getattr(child, 'name', None) == 'br':
-            if target_block is not None:
-                break
-            current_block = []
+def get_surrounding_text(a_tag):
+    """
+    【新設】<a>タグの前後にあるテキストを安全に取得。
+    他のリンクや改行にぶつかったらストップし、他商品のテキスト混同を100%防止する。
+    """
+    stop_tags = ['br', 'p', 'div', 'table', 'tr', 'td', 'a', 'li', 'ul', 'h1', 'h2', 'h3']
+    
+    prev_text = []
+    for sibling in a_tag.previous_siblings:
+        if sibling.name in stop_tags:
+            break
+        if isinstance(sibling, str):
+            txt = sibling.strip()
+            if txt:
+                prev_text.insert(0, txt)
         else:
-            if child == a_tag:
-                target_block = current_block
-            if isinstance(child, str):
-                text = child.strip()
-                if text:
-                    current_block.append(text)
-            elif hasattr(child, 'get_text'):
-                text = child.get_text(strip=True)
-                if text:
-                    current_block.append(text)
-
-    if target_block is not None:
-        return " ".join(target_block)
-    return a_tag.get_text(strip=True)
+            txt = sibling.get_text(strip=True)
+            if txt:
+                prev_text.insert(0, txt)
+                
+    next_text = []
+    for sibling in a_tag.next_siblings:
+        if sibling.name in stop_tags:
+            break
+        if isinstance(sibling, str):
+            txt = sibling.strip()
+            if txt:
+                next_text.append(txt)
+        else:
+            txt = sibling.get_text(strip=True)
+            if txt:
+                next_text.append(txt)
+                
+    a_text = a_tag.get_text(strip=True)
+    full_text = " ".join(prev_text) + " " + a_text + " " + " ".join(next_text)
+    full_text = re.sub(r'\s+', ' ', full_text).strip()
+    return full_text, a_text
 
 
 def fetch_site_items():
@@ -151,17 +159,18 @@ def fetch_site_items():
             if not href or href.startswith('javascript:'):
                 continue
 
-            line_text = get_line_for_a_tag(a_tag)
+            full_text, a_text = get_surrounding_text(a_tag)
 
-            if len(line_text) <= 3 or 'トーナメント' in line_text or 'お届け遅延' in line_text:
+            # バナー画像のみのリンクや短すぎるテキストを除外
+            if len(a_text) <= 3 or 'トーナメント' in full_text or 'お届け遅延' in full_text:
                 continue
 
-            genre_key = classify_genre(line_text)
+            genre_key = classify_genre(full_text)
             if genre_key == 'その他':
                 continue
 
             item_url = force_https_url(urljoin(TARGET_URL, href))
-            cleaned_title = clean_title(line_text)
+            cleaned_title = clean_title(full_text)
             item_id = hashlib.md5(f"{item_url}_{cleaned_title}".encode('utf-8')).hexdigest()
 
             if not any(i['item_id'] == item_id for i in raw_items):
@@ -169,7 +178,7 @@ def fetch_site_items():
                     'item_id': item_id,
                     'genre_key': genre_key,
                     'title': cleaned_title,
-                    'raw_title': line_text,
+                    'raw_title': full_text,
                     'url': item_url
                 })
 
