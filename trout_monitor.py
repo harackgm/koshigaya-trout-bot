@@ -1,6 +1,5 @@
 import os
 import re
-import sqlite3
 import hashlib
 from urllib.parse import urljoin
 import requests
@@ -9,12 +8,6 @@ from playwright.sync_api import sync_playwright
 
 # --- 基本設定 ---
 TARGET_URL = "https://www.area-island.com/"
-DB_FILE = "shop_data.db"
-TABLE_NAME = "notified_items"
-
-# --- ガードレール設定（安全装置） ---
-MAX_NOTIFY_LIMIT = 5  # 1回の実行で未通知がこの件数を超えた場合、通知を全キャンセルしてDBのみ更新
-
 LINE_CHANNEL_ACCESS_TOKEN = os.environ.get("LINE_CHANNEL_ACCESS_TOKEN", "")
 LINE_USER_ID = os.environ.get("LINE_USER_ID", "")
 DEFAULT_IMAGE_URL = "https://images.unsplash.com/photo-1544551763-46a013bb70d5?w=600&auto=format&fit=crop"
@@ -28,31 +21,6 @@ GENRE_CONFIG = [
     {'key': '入荷', 'keywords': ['入荷'], 'category': '【新着入荷】', 'color': '#1DB446'},
 ]
 DEFAULT_GENRE = {'category': '【新着更新】', 'color': '#607D8B'}
-
-
-def init_db():
-    conn = sqlite3.connect(DB_FILE)
-    cursor = conn.cursor()
-    cursor.execute(f"""
-        CREATE TABLE IF NOT EXISTS {TABLE_NAME} (
-            item_id TEXT PRIMARY KEY,
-            title TEXT,
-            url TEXT,
-            image_url TEXT,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-    conn.commit()
-    conn.close()
-
-
-def is_db_empty():
-    conn = sqlite3.connect(DB_FILE)
-    cursor = conn.cursor()
-    cursor.execute(f"SELECT COUNT(*) FROM {TABLE_NAME}")
-    count = cursor.fetchone()[0]
-    conn.close()
-    return count == 0
 
 
 def clean_title(title_text):
@@ -99,16 +67,8 @@ def get_genre_config_by_key(genre_key):
 
 
 def extract_items_from_html(html_content):
-    """
-    【新設】HTMLを改行タグで完全に分割し、1行ごとのブロック単位で解析する。
-    1行に複数リンクがあっても交差させない絶対独立抽出ロジック。
-    """
+    """HTMLソースレベルで完全に1行ずつ分割し、複数リンクの同居も独立抽出する最強ロジック"""
     soup = BeautifulSoup(html_content, 'html.parser')
-    
-    # brタグを改行文字に変換してからプレーンテキストとして行分割
-    for br in soup.find_all("br"):
-        br.replace_with("\n")
-        
     raw_items = []
     
     for a_tag in soup.find_all('a', href=True):
@@ -120,22 +80,32 @@ def extract_items_from_html(html_content):
         if not parent:
             continue
             
-        # 親要素のテキストを改行で分割し、aタグのテキストが含まれる行を探す
-        parent_text_lines = parent.get_text(separator="\n").split("\n")
-        a_text = a_tag.get_text(strip=True)
+        # 1. HTMLソースコードを文字列として取得
+        parent_html = str(parent)
         
-        target_line = ""
-        for line in parent_text_lines:
-            if a_text in line:
-                target_line = line.strip()
+        # 2. 改行タグと見えない改行コードを、独自の区切り文字【BR】に統一変換
+        parent_html = re.sub(r'<br\s*/?>', '【BR】', parent_html, flags=re.IGNORECASE)
+        parent_html = parent_html.replace('\n', '【BR】').replace('\r', '')
+        
+        # 3. 区切り文字で完全な行リストを作成
+        lines_html = parent_html.split('【BR】')
+        
+        # 4. ターゲットのリンクが完全に一致する行を探す
+        a_tag_str = str(a_tag)
+        target_line_html = ""
+        for line in lines_html:
+            if a_tag_str in line:
+                target_line_html = line
                 break
                 
-        if not target_line:
-            target_line = a_text
+        if not target_line_html:
+            target_line_html = a_tag_str
 
-        full_text = re.sub(r'\s+', ' ', target_line).strip()
+        # 5. HTMLタグを除去し、純粋なテキストのみを抽出
+        full_text = re.sub(r'<[^>]+>', ' ', target_line_html)
+        full_text = re.sub(r'\s+', ' ', full_text).strip()
 
-        if len(a_text) <= 3 or 'トーナメント' in full_text or 'お届け遅延' in full_text:
+        if len(full_text) <= 3 or 'トーナメント' in full_text or 'お届け遅延' in full_text:
             continue
 
         genre_key = classify_genre(full_text)
@@ -158,27 +128,20 @@ def extract_items_from_html(html_content):
     return raw_items
 
 
-def fetch_site_items():
+def fetch_test_items():
+    """8/26の複数リンク同居行を含め、最新8件分を取得（DBは無効化）"""
     items = []
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
         page = browser.new_page()
-
         page.goto(TARGET_URL, wait_until="domcontentloaded", timeout=30000)
         
         raw_items = extract_items_from_html(page.content())
 
-        # 各ジャンル最大1件ずつに絞り込む（5ジャンル取得用）
-        filtered_items = []
-        found_genres = set()
-        for item in raw_items:
-            if item['genre_key'] not in found_genres:
-                filtered_items.append(item)
-                found_genres.add(item['genre_key'])
-            if len(found_genres) >= 5:
-                break
+        # テスト用：最新（上から順番）に8件を抽出
+        filtered_items = raw_items[:8]
 
-        # 各商品の詳細ページへ移動し本物の画像を抽出
+        # 詳細ページから画像抽出
         for item in filtered_items:
             img_url = DEFAULT_IMAGE_URL
             try:
@@ -194,7 +157,7 @@ def fetch_site_items():
                     if any(kw in src.lower() for kw in ['upload', 'save_image', 'goods', 'product']):
                         break
             except Exception as e:
-                print(f"詳細ページの画像解析エラー ({item['url']}): {e}")
+                print(f"画像解析エラー: {e}")
 
             item['image_url'] = force_https_url(img_url)
             items.append(item)
@@ -260,7 +223,7 @@ def create_flex_carousel(items_chunk):
 
     return {
         "type": "flex",
-        "altText": f"【越谷トラウトアイランド】新着更新（{len(items_chunk)}件）",
+        "altText": f"【複数リンク分離テスト】最新取得（{len(items_chunk)}件）",
         "contents": {
             "type": "carousel",
             "contents": bubbles
@@ -268,10 +231,17 @@ def create_flex_carousel(items_chunk):
     }
 
 
-def send_line_flex_messages(items):
+def main():
     if not LINE_CHANNEL_ACCESS_TOKEN or not LINE_USER_ID:
-        print("エラー: LINEのアクセス情報が設定されていません。")
-        return False
+        print("エラー: LINE情報が設定されていません。")
+        return
+
+    print("【テスト専用モード】最新の8件を取得して送信します。")
+    items = fetch_test_items()
+
+    if not items:
+        print("商品が見つかりませんでした。")
+        return
 
     url = "https://api.line.me/v2/bot/message/push"
     headers = {
@@ -279,67 +249,16 @@ def send_line_flex_messages(items):
         "Authorization": f"Bearer {LINE_CHANNEL_ACCESS_TOKEN}"
     }
 
-    chunks = [items[i:i + 10] for i in range(0, len(items), 10)]
-    for chunk in chunks:
-        payload = {
-            "to": LINE_USER_ID,
-            "messages": [create_flex_carousel(chunk)]
-        }
-        res = requests.post(url, headers=headers, json=payload, timeout=10)
-        if res.status_code != 200:
-            print(f"LINE送信エラー: {res.status_code} - {res.text}")
-            return False
-    return True
+    payload = {
+        "to": LINE_USER_ID,
+        "messages": [create_flex_carousel(items)]
+    }
 
-
-def save_items(items):
-    conn = sqlite3.connect(DB_FILE)
-    cursor = conn.cursor()
-    for item in items:
-        cursor.execute(f"""
-            INSERT OR IGNORE INTO {TABLE_NAME} (item_id, title, url, image_url)
-            VALUES (?, ?, ?, ?)
-        """, (item['item_id'], item['title'], item['url'], item['image_url']))
-    conn.commit()
-    conn.close()
-
-
-def main():
-    init_db()
-    first_run = is_db_empty()
-
-    current_items = fetch_site_items()
-    if not current_items:
-        print("有効な入荷情報が検出されませんでした。")
-        return
-
-    if first_run:
-        save_items(current_items)
-        print("【初回起動検出】現在の入荷情報をDBに初期登録しました（LINE通知は送信されません）。")
-        return
-
-    conn = sqlite3.connect(DB_FILE)
-    cursor = conn.cursor()
-    new_items = []
-    for item in current_items:
-        cursor.execute(f"SELECT 1 FROM {TABLE_NAME} WHERE item_id = ?", (item['item_id'],))
-        if not cursor.fetchone():
-            new_items.append(item)
-    conn.close()
-
-    if not new_items:
-        print("新しい更新はありません。")
-        return
-
-    if len(new_items) > MAX_NOTIFY_LIMIT:
-        print(f"【大量通知ストッパー作動】{len(new_items)}件の未通知情報を検出。")
-        print(f"設定上限（{MAX_NOTIFY_LIMIT}件）を超えたため、LINE通知をキャンセルしてDBのみ更新します。")
-        save_items(new_items)
-        return
-
-    if send_line_flex_messages(new_items):
-        save_items(new_items)
-        print(f"{len(new_items)}件の新着入荷情報をLINEに送信しました。")
+    res = requests.post(url, headers=headers, json=payload, timeout=10)
+    if res.status_code == 200:
+        print("LINEへテスト通知を送信しました。")
+    else:
+        print(f"LINE送信エラー: {res.status_code} - {res.text}")
 
 
 if __name__ == "__main__":
