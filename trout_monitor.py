@@ -21,17 +21,16 @@ DEFAULT_IMAGE_URL = "https://images.unsplash.com/photo-1544551763-46a013bb70d5?w
 
 # 5ジャンルデザイン設定
 GENRE_CONFIG = [
-    {'key': '予約', 'keywords': ['ご予約', '予約'], 'category': '【ご予約】', 'color': '#FF5722'},                # オレンジ
-    {'key': '限定', 'keywords': ['期間限定', 'sale', 'セール'], 'category': '【期間限定】', 'color': '#8E24AA'}, # パープル
-    {'key': '新色', 'keywords': ['新色'], 'category': '【新色入荷】', 'color': '#EC407A'},              # ピンク
-    {'key': '再入荷', 'keywords': ['再入荷'], 'category': '【再入荷】', 'color': '#1E88E5'},              # ブルー
-    {'key': '入荷', 'keywords': ['入荷'], 'category': '【新着入荷】', 'color': '#1DB446'},              # グリーン
+    {'key': '予約', 'keywords': ['ご予約', '予約'], 'category': '【ご予約】', 'color': '#FF5722'},
+    {'key': '限定', 'keywords': ['期間限定', 'sale', 'セール'], 'category': '【期間限定】', 'color': '#8E24AA'},
+    {'key': '新色', 'keywords': ['新色'], 'category': '【新色入荷】', 'color': '#EC407A'},
+    {'key': '再入荷', 'keywords': ['再入荷'], 'category': '【再入荷】', 'color': '#1E88E5'},
+    {'key': '入荷', 'keywords': ['入荷'], 'category': '【新着入荷】', 'color': '#1DB446'},
 ]
 DEFAULT_GENRE = {'category': '【新着更新】', 'color': '#607D8B'}
 
 
 def init_db():
-    """データベース初期化"""
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
     cursor.execute(f"""
@@ -48,7 +47,6 @@ def init_db():
 
 
 def is_db_empty():
-    """DBが空（初回実行）判定"""
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
     cursor.execute(f"SELECT COUNT(*) FROM {TABLE_NAME}")
@@ -58,7 +56,6 @@ def is_db_empty():
 
 
 def clean_title(title_text):
-    """タイトルのクレンジング（日付や不要タグの除去）"""
     if not title_text:
         return "新着入荷商品"
     text = re.sub(r'^\d{1,2}/\d{1,2}\s*', '', title_text)
@@ -69,7 +66,6 @@ def clean_title(title_text):
 
 
 def force_https_url(url):
-    """すべてのURLをLINE API規格（HTTPS）に安全強制変換"""
     if not url:
         return TARGET_URL
     full_url = url.strip()
@@ -81,7 +77,6 @@ def force_https_url(url):
 
 
 def classify_genre(text):
-    """文字列から5ジャンルを優先度順に判定"""
     text_lower = text.lower()
     if '予約' in text_lower:
         return '予約'
@@ -97,93 +92,94 @@ def classify_genre(text):
 
 
 def get_genre_config_by_key(genre_key):
-    """ジャンルキーから配色設定を取得"""
     for g in GENRE_CONFIG:
         if g['key'] == genre_key:
             return g
     return DEFAULT_GENRE
 
 
-def get_surrounding_text(a_tag):
+def extract_items_from_html(html_content):
     """
-    【新設】<a>タグの前後にあるテキストを安全に取得。
-    他のリンクや改行にぶつかったらストップし、他商品のテキスト混同を100%防止する。
+    【新設】HTMLを改行タグで完全に分割し、1行ごとのブロック単位で解析する。
+    1行に複数リンクがあっても交差させない絶対独立抽出ロジック。
     """
-    stop_tags = ['br', 'p', 'div', 'table', 'tr', 'td', 'a', 'li', 'ul', 'h1', 'h2', 'h3']
+    soup = BeautifulSoup(html_content, 'html.parser')
     
-    prev_text = []
-    for sibling in a_tag.previous_siblings:
-        if sibling.name in stop_tags:
-            break
-        if isinstance(sibling, str):
-            txt = sibling.strip()
-            if txt:
-                prev_text.insert(0, txt)
-        else:
-            txt = sibling.get_text(strip=True)
-            if txt:
-                prev_text.insert(0, txt)
+    # brタグを改行文字に変換してからプレーンテキストとして行分割
+    for br in soup.find_all("br"):
+        br.replace_with("\n")
+        
+    raw_items = []
+    
+    for a_tag in soup.find_all('a', href=True):
+        href = a_tag['href']
+        if not href or href.startswith('javascript:') or 'gid=' in href:
+            continue
+            
+        parent = a_tag.parent
+        if not parent:
+            continue
+            
+        # 親要素のテキストを改行で分割し、aタグのテキストが含まれる行を探す
+        parent_text_lines = parent.get_text(separator="\n").split("\n")
+        a_text = a_tag.get_text(strip=True)
+        
+        target_line = ""
+        for line in parent_text_lines:
+            if a_text in line:
+                target_line = line.strip()
+                break
                 
-    next_text = []
-    for sibling in a_tag.next_siblings:
-        if sibling.name in stop_tags:
-            break
-        if isinstance(sibling, str):
-            txt = sibling.strip()
-            if txt:
-                next_text.append(txt)
-        else:
-            txt = sibling.get_text(strip=True)
-            if txt:
-                next_text.append(txt)
-                
-    a_text = a_tag.get_text(strip=True)
-    full_text = " ".join(prev_text) + " " + a_text + " " + " ".join(next_text)
-    full_text = re.sub(r'\s+', ' ', full_text).strip()
-    return full_text, a_text
+        if not target_line:
+            target_line = a_text
+
+        full_text = re.sub(r'\s+', ' ', target_line).strip()
+
+        if len(a_text) <= 3 or 'トーナメント' in full_text or 'お届け遅延' in full_text:
+            continue
+
+        genre_key = classify_genre(full_text)
+        if genre_key == 'その他':
+            continue
+
+        item_url = force_https_url(urljoin(TARGET_URL, href))
+        cleaned_title = clean_title(full_text)
+        item_id = hashlib.md5(f"{item_url}_{cleaned_title}".encode('utf-8')).hexdigest()
+
+        if not any(i['item_id'] == item_id for i in raw_items):
+            raw_items.append({
+                'item_id': item_id,
+                'genre_key': genre_key,
+                'title': cleaned_title,
+                'raw_title': full_text,
+                'url': item_url
+            })
+            
+    return raw_items
 
 
 def fetch_site_items():
-    """Webサイトから全入荷情報を抽出し、各商品詳細ページから本物の画像を特定"""
     items = []
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
         page = browser.new_page()
 
         page.goto(TARGET_URL, wait_until="domcontentloaded", timeout=30000)
-        soup = BeautifulSoup(page.content(), 'html.parser')
+        
+        raw_items = extract_items_from_html(page.content())
 
-        raw_items = []
-        for a_tag in soup.find_all('a', href=True):
-            href = a_tag['href']
-            if not href or href.startswith('javascript:'):
-                continue
-
-            full_text, a_text = get_surrounding_text(a_tag)
-
-            # バナー画像のみのリンクや短すぎるテキストを除外
-            if len(a_text) <= 3 or 'トーナメント' in full_text or 'お届け遅延' in full_text:
-                continue
-
-            genre_key = classify_genre(full_text)
-            if genre_key == 'その他':
-                continue
-
-            item_url = force_https_url(urljoin(TARGET_URL, href))
-            cleaned_title = clean_title(full_text)
-            item_id = hashlib.md5(f"{item_url}_{cleaned_title}".encode('utf-8')).hexdigest()
-
-            if not any(i['item_id'] == item_id for i in raw_items):
-                raw_items.append({
-                    'item_id': item_id,
-                    'genre_key': genre_key,
-                    'title': cleaned_title,
-                    'raw_title': full_text,
-                    'url': item_url
-                })
+        # 各ジャンル最大1件ずつに絞り込む（5ジャンル取得用）
+        filtered_items = []
+        found_genres = set()
+        for item in raw_items:
+            if item['genre_key'] not in found_genres:
+                filtered_items.append(item)
+                found_genres.add(item['genre_key'])
+            if len(found_genres) >= 5:
+                break
 
         # 各商品の詳細ページへ移動し本物の画像を抽出
-        for item in raw_items:
+        for item in filtered_items:
             img_url = DEFAULT_IMAGE_URL
             try:
                 page.goto(item['url'], wait_until="domcontentloaded", timeout=20000)
@@ -208,7 +204,6 @@ def fetch_site_items():
 
 
 def create_flex_carousel(items_chunk):
-    """LINE Flex Message Carousel (最大10件/メッセージ) の構築"""
     bubbles = []
     for item in items_chunk:
         genre = get_genre_config_by_key(item['genre_key'])
@@ -274,7 +269,6 @@ def create_flex_carousel(items_chunk):
 
 
 def send_line_flex_messages(items):
-    """LINE API経由で10件単位にパッキングして送信"""
     if not LINE_CHANNEL_ACCESS_TOKEN or not LINE_USER_ID:
         print("エラー: LINEのアクセス情報が設定されていません。")
         return False
@@ -299,7 +293,6 @@ def send_line_flex_messages(items):
 
 
 def save_items(items):
-    """アイテムを既読としてDB保存"""
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
     for item in items:
@@ -320,13 +313,11 @@ def main():
         print("有効な入荷情報が検出されませんでした。")
         return
 
-    # ガードレール 1: 初回起動時は全件DB化し通知を自動スキップ（大量通知防止）
     if first_run:
         save_items(current_items)
         print("【初回起動検出】現在の入荷情報をDBに初期登録しました（LINE通知は送信されません）。")
         return
 
-    # 未通知アイテムの抽出
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
     new_items = []
@@ -340,14 +331,12 @@ def main():
         print("新しい更新はありません。")
         return
 
-    # ガードレール 2: 大量通知ストッパー（MAX_LIMIT超過時の自動抑止）
     if len(new_items) > MAX_NOTIFY_LIMIT:
         print(f"【大量通知ストッパー作動】{len(new_items)}件の未通知情報を検出。")
         print(f"設定上限（{MAX_NOTIFY_LIMIT}件）を超えたため、LINE通知をキャンセルしてDBのみ更新します。")
         save_items(new_items)
         return
 
-    # 通常通知処理
     if send_line_flex_messages(new_items):
         save_items(new_items)
         print(f"{len(new_items)}件の新着入荷情報をLINEに送信しました。")
