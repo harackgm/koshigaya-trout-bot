@@ -12,6 +12,9 @@ LINE_CHANNEL_ACCESS_TOKEN = os.environ.get("LINE_CHANNEL_ACCESS_TOKEN", "")
 LINE_USER_ID = os.environ.get("LINE_USER_ID", "")
 DEFAULT_IMAGE_URL = "https://images.unsplash.com/photo-1544551763-46a013bb70d5?w=600&auto=format&fit=crop"
 
+# ガードレール（本番用ストッパー構造の維持）
+MAX_NOTIFY_LIMIT = 5 
+
 # 5ジャンルデザイン設定
 GENRE_CONFIG = [
     {'key': '予約', 'keywords': ['ご予約', '予約'], 'category': '【ご予約】', 'color': '#FF5722'},
@@ -80,17 +83,12 @@ def extract_items_from_html(html_content):
         if not parent:
             continue
             
-        # 1. HTMLソースコードを文字列として取得
         parent_html = str(parent)
-        
-        # 2. 改行タグと見えない改行コードを、独自の区切り文字【BR】に統一変換
         parent_html = re.sub(r'<br\s*/?>', '【BR】', parent_html, flags=re.IGNORECASE)
         parent_html = parent_html.replace('\n', '【BR】').replace('\r', '')
         
-        # 3. 区切り文字で完全な行リストを作成
         lines_html = parent_html.split('【BR】')
         
-        # 4. ターゲットのリンクが完全に一致する行を探す
         a_tag_str = str(a_tag)
         target_line_html = ""
         for line in lines_html:
@@ -101,7 +99,6 @@ def extract_items_from_html(html_content):
         if not target_line_html:
             target_line_html = a_tag_str
 
-        # 5. HTMLタグを除去し、純粋なテキストのみを抽出
         full_text = re.sub(r'<[^>]+>', ' ', target_line_html)
         full_text = re.sub(r'\s+', ' ', full_text).strip()
 
@@ -129,7 +126,7 @@ def extract_items_from_html(html_content):
 
 
 def fetch_test_items():
-    """8/26の複数リンク同居行を含め、最新8件分を取得（DBは無効化）"""
+    """上部の予約を飛ばし、8/26の対象商品のみをピンポイント抽出（DB無効化）"""
     items = []
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
@@ -138,8 +135,9 @@ def fetch_test_items():
         
         raw_items = extract_items_from_html(page.content())
 
-        # テスト用：最新（上から順番）に8件を抽出
-        filtered_items = raw_items[:8]
+        # テスト用：ターゲット文字列を含むものだけを抽出（1行複数リンクの分離テスト用）
+        target_keywords = ['ムカイ', 'ラッキークラフト×GATE', 'アルフレッド']
+        filtered_items = [item for item in raw_items if any(kw in item['raw_title'] for kw in target_keywords)]
 
         # 詳細ページから画像抽出
         for item in filtered_items:
@@ -223,7 +221,7 @@ def create_flex_carousel(items_chunk):
 
     return {
         "type": "flex",
-        "altText": f"【複数リンク分離テスト】最新取得（{len(items_chunk)}件）",
+        "altText": f"【リンク分離テスト】対象取得（{len(items_chunk)}件）",
         "contents": {
             "type": "carousel",
             "contents": bubbles
@@ -236,11 +234,11 @@ def main():
         print("エラー: LINE情報が設定されていません。")
         return
 
-    print("【テスト専用モード】最新の8件を取得して送信します。")
+    print("【テスト専用モード】対象キーワードの商品のみを抽出して送信します。")
     items = fetch_test_items()
 
     if not items:
-        print("商品が見つかりませんでした。")
+        print("対象の商品が見つかりませんでした。")
         return
 
     url = "https://api.line.me/v2/bot/message/push"
