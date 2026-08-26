@@ -13,13 +13,14 @@ DB_FILE = "shop_data.db"
 TABLE_NAME = "notified_items"
 
 # --- ガードレール設定（安全装置） ---
-MAX_NOTIFY_LIMIT = 5  # 1回の実行で未通知がこの件数を超えた場合、通知を全キャンセルしてDBのみ更新
+# 同日最大更新数（7件）を考慮し、見逃し防止と連投防止を両立する安全値に設定
+MAX_NOTIFY_LIMIT = 10  
 
 LINE_CHANNEL_ACCESS_TOKEN = os.environ.get("LINE_CHANNEL_ACCESS_TOKEN", "")
 LINE_USER_ID = os.environ.get("LINE_USER_ID", "")
 DEFAULT_IMAGE_URL = "https://images.unsplash.com/photo-1544551763-46a013bb70d5?w=600&auto=format&fit=crop"
 
-# 5ジャンルデザイン設定
+# 5ジャンルデザイン設定（変更なし）
 GENRE_CONFIG = [
     {'key': '予約', 'keywords': ['ご予約', '予約'], 'category': '【ご予約】', 'color': '#FF5722'},
     {'key': '限定', 'keywords': ['期間限定', 'sale', 'セール'], 'category': '【期間限定】', 'color': '#8E24AA'},
@@ -99,7 +100,7 @@ def get_genre_config_by_key(genre_key):
 
 
 def extract_items_from_html(html_content):
-    """【実証済み】HTMLを改行で完全分割し、複数リンクも独立抽出する最強ロジック"""
+    """HTMLを改行で完全分割し、複数リンクも独立抽出するロジック"""
     soup = BeautifulSoup(html_content, 'html.parser')
     raw_items = []
     
@@ -149,7 +150,7 @@ def extract_items_from_html(html_content):
                 'title': cleaned_title,
                 'raw_title': full_text,
                 'url': item_url,
-                'image_url': DEFAULT_IMAGE_URL # 初期値
+                'image_url': DEFAULT_IMAGE_URL
             })
             
     return raw_items
@@ -260,7 +261,6 @@ def main():
     init_db()
     first_run = is_db_empty()
 
-    # 1. サイト全体からテキスト・URL等の基本情報のみを全件抽出（高速）
     raw_items = []
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
@@ -273,14 +273,12 @@ def main():
             browser.close()
             return
 
-        # ガードレール 1: 初回起動時は画像を取得せず全件DB化し通知スキップ
         if first_run:
             save_items(raw_items)
             print("【初回起動検出】現在の全商品をDBに初期登録しました（通知は送信されません）。")
             browser.close()
             return
 
-        # 2. データベースと照合し、未通知（新着）のアイテムのみを洗い出す
         conn = sqlite3.connect(DB_FILE)
         cursor = conn.cursor()
         new_items = []
@@ -295,7 +293,7 @@ def main():
             browser.close()
             return
 
-        # ガードレール 2: 大量通知ストッパー（MAX_LIMIT超過時の自動抑止）
+        # ガードレール: 10件超過時の自動抑止（サーバー負荷・連投防止）
         if len(new_items) > MAX_NOTIFY_LIMIT:
             print(f"【大量通知ストッパー作動】{len(new_items)}件の新着情報を検出。")
             print(f"設定上限（{MAX_NOTIFY_LIMIT}件）を超えたため、LINE通知をキャンセルしてDBのみ更新します。")
@@ -303,7 +301,7 @@ def main():
             browser.close()
             return
 
-        # 3. 通知対象の商品だけ詳細ページへアクセスし、画像をピンポイント取得（サーバー負荷劇的軽減）
+        # 新着商品のみ詳細ページへアクセス（サーバー負荷軽減）
         print(f"{len(new_items)}件の新着商品を検知。画像を取得します...")
         for item in new_items:
             img_url = DEFAULT_IMAGE_URL
@@ -323,7 +321,6 @@ def main():
             
         browser.close()
 
-    # 4. 通常通知処理
     if send_line_flex_messages(new_items):
         save_items(new_items)
         print(f"{len(new_items)}件の新着入荷情報をLINEに送信し、DBを更新しました。")
