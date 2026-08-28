@@ -1,5 +1,6 @@
 import os
 import re
+import sqlite3
 import hashlib
 from urllib.parse import urljoin
 import requests
@@ -8,13 +9,19 @@ from playwright.sync_api import sync_playwright
 
 # --- 基本設定 ---
 TARGET_URL = "https://www.area-island.com/"
+DB_FILE = "shop_data.db"
+TABLE_NAME = "notified_items"
+
+# --- ガードレール設定（安全装置） ---
+MAX_NOTIFY_LIMIT = 10  # 同時新着の上限数（11件以上は自動でLINE通知スキップして既読化）
+
 LINE_CHANNEL_ACCESS_TOKEN = os.environ.get("LINE_CHANNEL_ACCESS_TOKEN", "")
 LINE_USER_ID = os.environ.get("LINE_USER_ID", "")
 DEFAULT_IMAGE_URL = "https://images.unsplash.com/photo-1544551763-46a013bb70d5?w=600&auto=format&fit=crop"
 
-# 6ジャンルデザイン設定（「お知らせ」を追加）
+# 6ジャンルデザイン設定
 GENRE_CONFIG = [
-    {'key': 'お知らせ', 'keywords': ['感謝祭', 'イベント', 'お知らせ', '受付', 'キャンセル待ち'], 'category': '【お知らせ】', 'color': '#D32F2F'}, # レッド
+    {'key': 'お知らせ', 'keywords': ['感謝祭', 'ファン感謝', 'キャンセル待ち'], 'category': '【お知らせ】', 'color': '#D32F2F'}, # レッド
     {'key': '予約', 'keywords': ['ご予約', '予約'], 'category': '【ご予約】', 'color': '#FF5722'},                # オレンジ
     {'key': '限定', 'keywords': ['期間限定', 'sale', 'セール'], 'category': '【期間限定】', 'color': '#8E24AA'}, # パープル
     {'key': '新色', 'keywords': ['新色'], 'category': '【新色入荷】', 'color': '#EC407A'},              # ピンク
@@ -22,6 +29,31 @@ GENRE_CONFIG = [
     {'key': '入荷', 'keywords': ['入荷'], 'category': '【新着入荷】', 'color': '#1DB446'},              # グリーン
 ]
 DEFAULT_GENRE = {'category': '【新着更新】', 'color': '#607D8B'}
+
+
+def init_db():
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    cursor.execute(f"""
+        CREATE TABLE IF NOT EXISTS {TABLE_NAME} (
+            item_id TEXT PRIMARY KEY,
+            title TEXT,
+            url TEXT,
+            image_url TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    conn.commit()
+    conn.close()
+
+
+def is_db_empty():
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    cursor.execute(f"SELECT COUNT(*) FROM {TABLE_NAME}")
+    count = cursor.fetchone()[0]
+    conn.close()
+    return count == 0
 
 
 def clean_title(title_text):
@@ -47,8 +79,8 @@ def force_https_url(url):
 
 def classify_genre(text):
     text_lower = text.lower()
-    # イベント・お知らせ系を最優先で判定
-    if any(kw in text_lower for kw in ['感謝祭', 'イベント', 'お知らせ', '受付', 'キャンセル待ち']):
+    # 感謝祭・特定の告知イベントのみ厳密に「お知らせ」判定
+    if any(kw in text_lower for kw in ['感謝祭', 'ファン感謝', 'キャンセル待ち']):
         return 'お知らせ'
     elif '予約' in text_lower:
         return '予約'
@@ -71,7 +103,6 @@ def get_genre_config_by_key(genre_key):
 
 
 def extract_items_from_html(html_content):
-    """HTMLを改行で完全分割し、イベント・お知らせ枠を含めて安全抽出"""
     soup = BeautifulSoup(html_content, 'html.parser')
     raw_items = []
     
@@ -103,7 +134,7 @@ def extract_items_from_html(html_content):
         full_text = re.sub(r'<[^>]+>', ' ', target_line_html)
         full_text = re.sub(r'\s+', ' ', full_text).strip()
 
-        # 不要な一般バナーのみ除外
+        # 不要バナー・ナビゲーション枠を除外
         if len(full_text) <= 3 or 'トーナメント' in full_text or 'お届け遅延' in full_text:
             continue
 
@@ -126,45 +157,6 @@ def extract_items_from_html(html_content):
             })
             
     return raw_items
-
-
-def fetch_test_items():
-    """テスト用：イベント告知＋最新商品を抽出"""
-    items = []
-    with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True)
-        page = browser.new_page()
-        page.goto(TARGET_URL, wait_until="domcontentloaded", timeout=30000)
-        
-        raw_items = extract_items_from_html(page.content())
-
-        # お知らせ枠（感謝祭等）＋最新商品を最大5件ピックアップ
-        filtered_items = [i for i in raw_items if i['genre_key'] == 'お知らせ']
-        for i in raw_items:
-            if i not in filtered_items:
-                filtered_items.append(i)
-            if len(filtered_items) >= 5:
-                break
-
-        for item in filtered_items:
-            img_url = DEFAULT_IMAGE_URL
-            try:
-                page.goto(item['url'], wait_until="domcontentloaded", timeout=20000)
-                detail_soup = BeautifulSoup(page.content(), 'html.parser')
-                for img in detail_soup.find_all('img', src=True):
-                    src = img['src']
-                    if any(ex in src.lower() for ex in ['blank.gif', 'spacer.gif', 'logo', 'banner', 'btn', 'cart', 'header', 'footer']):
-                        continue
-                    img_url = force_https_url(urljoin(item['url'], src))
-                    if any(kw in src.lower() for kw in ['upload', 'save_image', 'goods', 'product']):
-                        break
-            except Exception as e:
-                print(f"詳細ページ解析エラー: {e}")
-            item['image_url'] = force_https_url(img_url)
-            items.append(item)
-
-        browser.close()
-    return items
 
 
 def create_flex_carousel(items_chunk):
@@ -224,7 +216,7 @@ def create_flex_carousel(items_chunk):
 
     return {
         "type": "flex",
-        "altText": f"【イベント検知テスト】通知（{len(items_chunk)}件）",
+        "altText": f"【越谷トラウトアイランド】新着更新（{len(items_chunk)}件）",
         "contents": {
             "type": "carousel",
             "contents": bubbles
@@ -232,17 +224,10 @@ def create_flex_carousel(items_chunk):
     }
 
 
-def main():
+def send_line_flex_messages(items):
     if not LINE_CHANNEL_ACCESS_TOKEN or not LINE_USER_ID:
-        print("エラー: LINE情報が設定されていません。")
-        return
-
-    print("【テスト専用モード】ヴァルケインファン感謝祭を含むテスト通知を送信します...")
-    items = fetch_test_items()
-
-    if not items:
-        print("対象が見つかりませんでした。")
-        return
+        print("エラー: LINEのアクセス情報が設定されていません。")
+        return False
 
     url = "https://api.line.me/v2/bot/message/push"
     headers = {
@@ -250,16 +235,98 @@ def main():
         "Authorization": f"Bearer {LINE_CHANNEL_ACCESS_TOKEN}"
     }
 
-    payload = {
-        "to": LINE_USER_ID,
-        "messages": [create_flex_carousel(items)]
-    }
+    chunks = [items[i:i + 10] for i in range(0, len(items), 10)]
+    for chunk in chunks:
+        payload = {
+            "to": LINE_USER_ID,
+            "messages": [create_flex_carousel(chunk)]
+        }
+        res = requests.post(url, headers=headers, json=payload, timeout=10)
+        if res.status_code != 200:
+            print(f"LINE送信エラー: {res.status_code} - {res.text}")
+            return False
+    return True
 
-    res = requests.post(url, headers=headers, json=payload, timeout=10)
-    if res.status_code == 200:
-        print("LINEへテスト通知を送信しました。")
-    else:
-        print(f"LINE送信エラー: {res.status_code} - {res.text}")
+
+def save_items(items):
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    for item in items:
+        cursor.execute(f"""
+            INSERT OR IGNORE INTO {TABLE_NAME} (item_id, title, url, image_url)
+            VALUES (?, ?, ?, ?)
+        """, (item['item_id'], item['title'], item['url'], item['image_url']))
+    conn.commit()
+    conn.close()
+
+
+def main():
+    init_db()
+    first_run = is_db_empty()
+
+    raw_items = []
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True)
+        page = browser.new_page()
+        page.goto(TARGET_URL, wait_until="domcontentloaded", timeout=30000)
+        raw_items = extract_items_from_html(page.content())
+
+        if not raw_items:
+            print("有効な入荷情報が検出されませんでした。")
+            browser.close()
+            return
+
+        if first_run:
+            save_items(raw_items)
+            print("【初回起動検出】現在の全商品をDBに初期登録しました（通知は送信されません）。")
+            browser.close()
+            return
+
+        conn = sqlite3.connect(DB_FILE)
+        cursor = conn.cursor()
+        new_items = []
+        for item in raw_items:
+            cursor.execute(f"SELECT 1 FROM {TABLE_NAME} WHERE item_id = ?", (item['item_id'],))
+            if not cursor.fetchone():
+                new_items.append(item)
+        conn.close()
+
+        if not new_items:
+            print("新しい更新はありませんでした。")
+            browser.close()
+            return
+
+        # ガードレール: 10件超過時の自動抑止（連投防止）
+        if len(new_items) > MAX_NOTIFY_LIMIT:
+            print(f"【大量通知ストッパー作動】{len(new_items)}件の新着情報を検出。")
+            print(f"設定上限（{MAX_NOTIFY_LIMIT}件）を超えたため、LINE通知をキャンセルしてDBのみ更新します。")
+            save_items(new_items)
+            browser.close()
+            return
+
+        # 未通知商品のみ画像取得
+        print(f"{len(new_items)}件の新着を検知。画像を取得します...")
+        for item in new_items:
+            img_url = DEFAULT_IMAGE_URL
+            try:
+                page.goto(item['url'], wait_until="domcontentloaded", timeout=20000)
+                detail_soup = BeautifulSoup(page.content(), 'html.parser')
+                for img in detail_soup.find_all('img', src=True):
+                    src = img['src']
+                    if any(ex in src.lower() for ex in ['blank.gif', 'spacer.gif', 'logo', 'banner', 'btn', 'cart', 'header', 'footer']):
+                        continue
+                    img_url = force_https_url(urljoin(item['url'], src))
+                    if any(kw in src.lower() for kw in ['upload', 'save_image', 'goods', 'product']):
+                        break
+            except Exception as e:
+                print(f"詳細ページの画像解析エラー ({item['url']}): {e}")
+            item['image_url'] = force_https_url(img_url)
+            
+        browser.close()
+
+    if send_line_flex_messages(new_items):
+        save_items(new_items)
+        print(f"{len(new_items)}件の新着入荷情報をLINEに送信し、DBを更新しました。")
 
 
 if __name__ == "__main__":
