@@ -13,7 +13,9 @@ DB_FILE = "shop_data.db"
 TABLE_NAME = "notified_items"
 
 # --- ガードレール設定（安全装置） ---
-MAX_NOTIFY_LIMIT = 10  # 同時新着の上限数（11件以上は自動でLINE通知スキップして既読化）
+# 1通知5件×最大3回＝合計15件まで許容。16件以上は自動でLINE通知をスキップしてDBのみ更新
+MAX_NOTIFY_LIMIT = 15  
+CAROUSEL_CHUNK_SIZE = 5  # カルーセル1通知あたりの最大商品数
 
 LINE_CHANNEL_ACCESS_TOKEN = os.environ.get("LINE_CHANNEL_ACCESS_TOKEN", "")
 LINE_USER_ID = os.environ.get("LINE_USER_ID", "")
@@ -79,7 +81,6 @@ def force_https_url(url):
 
 def classify_genre(text):
     text_lower = text.lower()
-    # 感謝祭・特定の告知イベントのみ厳密に「お知らせ」判定
     if any(kw in text_lower for kw in ['感謝祭', 'ファン感謝', 'キャンセル待ち']):
         return 'お知らせ'
     elif '予約' in text_lower:
@@ -134,7 +135,6 @@ def extract_items_from_html(html_content):
         full_text = re.sub(r'<[^>]+>', ' ', target_line_html)
         full_text = re.sub(r'\s+', ' ', full_text).strip()
 
-        # 不要バナー・ナビゲーション枠を除外
         if len(full_text) <= 3 or 'トーナメント' in full_text or 'お届け遅延' in full_text:
             continue
 
@@ -225,6 +225,7 @@ def create_flex_carousel(items_chunk):
 
 
 def send_line_flex_messages(items):
+    """【改修】商品を5件ずつのブロックに区切ってLINE送信"""
     if not LINE_CHANNEL_ACCESS_TOKEN or not LINE_USER_ID:
         print("エラー: LINEのアクセス情報が設定されていません。")
         return False
@@ -235,7 +236,8 @@ def send_line_flex_messages(items):
         "Authorization": f"Bearer {LINE_CHANNEL_ACCESS_TOKEN}"
     }
 
-    chunks = [items[i:i + 10] for i in range(0, len(items), 10)]
+    # 5件ずつに分割してカルーセルメッセージを作成
+    chunks = [items[i:i + CAROUSEL_CHUNK_SIZE] for i in range(0, len(items), CAROUSEL_CHUNK_SIZE)]
     for chunk in chunks:
         payload = {
             "to": LINE_USER_ID,
@@ -296,7 +298,7 @@ def main():
             browser.close()
             return
 
-        # ガードレール: 10件超過時の自動抑止（連投防止）
+        # ガードレール: 15件超過時の自動抑止（通知爆発防止）
         if len(new_items) > MAX_NOTIFY_LIMIT:
             print(f"【大量通知ストッパー作動】{len(new_items)}件の新着情報を検出。")
             print(f"設定上限（{MAX_NOTIFY_LIMIT}件）を超えたため、LINE通知をキャンセルしてDBのみ更新します。")
@@ -304,7 +306,7 @@ def main():
             browser.close()
             return
 
-        # 未通知商品のみ画像取得
+        # 新着商品のみ詳細ページへアクセス
         print(f"{len(new_items)}件の新着を検知。画像を取得します...")
         for item in new_items:
             img_url = DEFAULT_IMAGE_URL
