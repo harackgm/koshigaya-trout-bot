@@ -1,5 +1,6 @@
 import os
 import re
+import sqlite3
 import hashlib
 from urllib.parse import urljoin
 import requests
@@ -8,11 +9,18 @@ from playwright.sync_api import sync_playwright
 
 # --- 基本設定 ---
 TARGET_URL = "https://www.area-island.com/"
+DB_FILE = "shop_data.db"
+TABLE_NAME = "notified_items"
+
+# --- ガードレール設定（安全装置） ---
+MAX_NOTIFY_LIMIT = 15  # 15件まで許可（16件以上は自動でLINE通知をスキップしてDBのみ更新）
+CAROUSEL_CHUNK_SIZE = 5  # カルーセル1通知あたりの最大商品数
+
 LINE_CHANNEL_ACCESS_TOKEN = os.environ.get("LINE_CHANNEL_ACCESS_TOKEN", "")
 LINE_USER_ID = os.environ.get("LINE_USER_ID", "")
 DEFAULT_IMAGE_URL = "https://images.unsplash.com/photo-1544551763-46a013bb70d5?w=600&auto=format&fit=crop"
 
-# 6ジャンルデザイン設定（デザイン・配色完全保持）
+# 6ジャンルデザイン設定
 GENRE_CONFIG = [
     {'key': 'お知らせ', 'keywords': ['感謝祭', 'ファン感謝', 'キャンセル待ち'], 'category': '【お知らせ】', 'color': '#D32F2F'}, # レッド
     {'key': '予約', 'keywords': ['ご予約', '予約'], 'category': '【ご予約】', 'color': '#FF5722'},                # オレンジ
@@ -22,6 +30,31 @@ GENRE_CONFIG = [
     {'key': '入荷', 'keywords': ['入荷'], 'category': '【新着入荷】', 'color': '#1DB446'},              # グリーン
 ]
 DEFAULT_GENRE = {'category': '【新着更新】', 'color': '#607D8B'}
+
+
+def init_db():
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    cursor.execute(f"""
+        CREATE TABLE IF NOT EXISTS {TABLE_NAME} (
+            item_id TEXT PRIMARY KEY,
+            title TEXT,
+            url TEXT,
+            image_url TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    conn.commit()
+    conn.close()
+
+
+def is_db_empty():
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    cursor.execute(f"SELECT COUNT(*) FROM {TABLE_NAME}")
+    count = cursor.fetchone()[0]
+    conn.close()
+    return count == 0
 
 
 def clean_title(title_text):
@@ -125,41 +158,6 @@ def extract_items_from_html(html_content):
     return raw_items
 
 
-def fetch_test_items():
-    """【テスト用】「予約」および「限定」商品を優先して最新5件抽出"""
-    items = []
-    with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True)
-        page = browser.new_page()
-        page.goto(TARGET_URL, wait_until="domcontentloaded", timeout=30000)
-        
-        raw_items = extract_items_from_html(page.content())
-
-        # 予約および限定エリアの商品を抽出
-        filtered_items = [i for i in raw_items if i['genre_key'] in ['予約', '限定']]
-        filtered_items = filtered_items[:5]
-
-        for item in filtered_items:
-            img_url = DEFAULT_IMAGE_URL
-            try:
-                page.goto(item['url'], wait_until="domcontentloaded", timeout=20000)
-                detail_soup = BeautifulSoup(page.content(), 'html.parser')
-                for img in detail_soup.find_all('img', src=True):
-                    src = img['src']
-                    if any(ex in src.lower() for ex in ['blank.gif', 'spacer.gif', 'logo', 'banner', 'btn', 'cart', 'header', 'footer']):
-                        continue
-                    img_url = force_https_url(urljoin(item['url'], src))
-                    if any(kw in src.lower() for kw in ['upload', 'save_image', 'goods', 'product']):
-                        break
-            except Exception as e:
-                print(f"詳細ページ解析エラー: {e}")
-            item['image_url'] = force_https_url(img_url)
-            items.append(item)
-
-        browser.close()
-    return items
-
-
 def create_flex_carousel(items_chunk):
     bubbles = []
     for item in items_chunk:
@@ -217,7 +215,7 @@ def create_flex_carousel(items_chunk):
 
     return {
         "type": "flex",
-        "altText": f"【予約・限定検知テスト】（{len(items_chunk)}件）",
+        "altText": f"【越谷トラウトアイランド】新着更新（{len(items_chunk)}件）",
         "contents": {
             "type": "carousel",
             "contents": bubbles
@@ -225,17 +223,11 @@ def create_flex_carousel(items_chunk):
     }
 
 
-def main():
+def send_line_flex_messages(items):
+    """5件ずつのブロックに区切ってLINE送信"""
     if not LINE_CHANNEL_ACCESS_TOKEN or not LINE_USER_ID:
-        print("エラー: LINE情報が設定されていません。")
-        return
-
-    print("【テスト専用モード】「予約」および「限定」商品の抽出テストを実行します...")
-    items = fetch_test_items()
-
-    if not items:
-        print("対象が見つかりませんでした。")
-        return
+        print("エラー: LINEのアクセス情報が設定されていません。")
+        return False
 
     url = "https://api.line.me/v2/bot/message/push"
     headers = {
@@ -243,16 +235,98 @@ def main():
         "Authorization": f"Bearer {LINE_CHANNEL_ACCESS_TOKEN}"
     }
 
-    payload = {
-        "to": LINE_USER_ID,
-        "messages": [create_flex_carousel(items)]
-    }
+    chunks = [items[i:i + CAROUSEL_CHUNK_SIZE] for i in range(0, len(items), CAROUSEL_CHUNK_SIZE)]
+    for chunk in chunks:
+        payload = {
+            "to": LINE_USER_ID,
+            "messages": [create_flex_carousel(chunk)]
+        }
+        res = requests.post(url, headers=headers, json=payload, timeout=10)
+        if res.status_code != 200:
+            print(f"LINE送信エラー: {res.status_code} - {res.text}")
+            return False
+    return True
 
-    res = requests.post(url, headers=headers, json=payload, timeout=10)
-    if res.status_code == 200:
-        print("LINEへテスト通知を送信しました。")
-    else:
-        print(f"LINE送信エラー: {res.status_code} - {res.text}")
+
+def save_items(items):
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    for item in items:
+        cursor.execute(f"""
+            INSERT OR IGNORE INTO {TABLE_NAME} (item_id, title, url, image_url)
+            VALUES (?, ?, ?, ?)
+        """, (item['item_id'], item['title'], item['url'], item['image_url']))
+    conn.commit()
+    conn.close()
+
+
+def main():
+    init_db()
+    first_run = is_db_empty()
+
+    raw_items = []
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True)
+        page = browser.new_page()
+        page.goto(TARGET_URL, wait_until="domcontentloaded", timeout=30000)
+        raw_items = extract_items_from_html(page.content())
+
+        if not raw_items:
+            print("有効な入荷情報が検出されませんでした。")
+            browser.close()
+            return
+
+        if first_run:
+            save_items(raw_items)
+            print("【初回起動検出】現在の全商品をDBに初期登録しました（通知は送信されません）。")
+            browser.close()
+            return
+
+        conn = sqlite3.connect(DB_FILE)
+        cursor = conn.cursor()
+        new_items = []
+        for item in raw_items:
+            cursor.execute(f"SELECT 1 FROM {TABLE_NAME} WHERE item_id = ?", (item['item_id'],))
+            if not cursor.fetchone():
+                new_items.append(item)
+        conn.close()
+
+        if not new_items:
+            print("新しい更新はありませんでした。")
+            browser.close()
+            return
+
+        # ガードレール: 15件超過時の自動抑止（連投防止）
+        if len(new_items) > MAX_NOTIFY_LIMIT:
+            print(f"【大量通知ストッパー作動】{len(new_items)}件の新着情報を検出。")
+            print(f"設定上限（{MAX_NOTIFY_LIMIT}件）を超えたため、LINE通知をキャンセルしてDBのみ更新します。")
+            save_items(new_items)
+            browser.close()
+            return
+
+        # 未通知商品のみ詳細ページへアクセス
+        print(f"{len(new_items)}件の新着を検知。画像を取得します...")
+        for item in new_items:
+            img_url = DEFAULT_IMAGE_URL
+            try:
+                page.goto(item['url'], wait_until="domcontentloaded", timeout=20000)
+                detail_soup = BeautifulSoup(page.content(), 'html.parser')
+                for img in detail_soup.find_all('img', src=True):
+                    src = img['src']
+                    if any(ex in src.lower() for ex in ['blank.gif', 'spacer.gif', 'logo', 'banner', 'btn', 'cart', 'header', 'footer']):
+                        continue
+                    img_url = force_https_url(urljoin(item['url'], src))
+                    if any(kw in src.lower() for kw in ['upload', 'save_image', 'goods', 'product']):
+                        break
+            except Exception as e:
+                print(f"詳細ページの画像解析エラー ({item['url']}): {e}")
+            item['image_url'] = force_https_url(img_url)
+            
+        browser.close()
+
+    if send_line_flex_messages(new_items):
+        save_items(new_items)
+        print(f"{len(new_items)}件の新着入荷情報をLINEに送信し、DBを更新しました。")
 
 
 if __name__ == "__main__":
