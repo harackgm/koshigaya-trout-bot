@@ -224,7 +224,7 @@ def create_flex_carousel(items_chunk):
 
 
 def send_line_flex_messages(items):
-    """5件ずつのブロックに区切ってLINE送信"""
+    """5件ずつのブロックに区切ってLINE送信（上限エラー判定を追加）"""
     if not LINE_CHANNEL_ACCESS_TOKEN or not LINE_USER_ID:
         print("エラー: LINEのアクセス情報が設定されていません。")
         return False
@@ -242,9 +242,17 @@ def send_line_flex_messages(items):
             "messages": [create_flex_carousel(chunk)]
         }
         res = requests.post(url, headers=headers, json=payload, timeout=10)
+        
+        # エラー発生時の判定
         if res.status_code != 200:
-            print(f"LINE送信エラー: {res.status_code} - {res.text}")
+            res_text = res.text.lower()
+            # 200通超過時、あるいは上限に起因するレスポンスの場合に指定ログを出力
+            if res.status_code in [400, 429] and any(kw in res_text for kw in ['limit', 'quota', 'exceeded']):
+                print("[ERROR] 今月分のLINE通知上限（200通）に到達しました。")
+            else:
+                print(f"[ERROR] LINE送信失敗 ({res.status_code}): {res.text}")
             return False
+
     return True
 
 
@@ -324,6 +332,7 @@ def main():
             
         browser.close()
 
+    # LINE送信（成功時のみDB保存）
     if send_line_flex_messages(new_items):
         save_items(new_items)
         print(f"{len(new_items)}件の新着入荷情報をLINEに送信し、DBを更新しました。")
