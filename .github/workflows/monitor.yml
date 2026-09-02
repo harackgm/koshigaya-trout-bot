@@ -1,9 +1,7 @@
 name: Trout Island Monitor Bot
 
 on:
-  schedule:
-    - cron: '*/30 * * * *'  # 30分ごとに自動実行
-  workflow_dispatch:        # 手動実行ボタンを有効化
+  workflow_dispatch:        # cron-job.orgからの呼び出しおよび手動実行ボタンのみ有効化
 
 jobs:
   monitor:
