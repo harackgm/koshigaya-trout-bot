@@ -19,7 +19,7 @@ CAROUSEL_CHUNK_SIZE = 5  # カルーセル1通知あたりの最大商品数
 LINE_CHANNEL_ACCESS_TOKEN = os.environ.get("LINE_CHANNEL_ACCESS_TOKEN", "")
 LINE_USER_ID = os.environ.get("LINE_USER_ID", "")
 
-# 【更新】画像取得失敗時の予備画像URL（アップロードされたkositoralogo.jpgを参照）
+# 画像取得失敗時の予備画像URL（GitHubリポジトリ上のロゴ画像）
 DEFAULT_IMAGE_URL = "https://raw.githubusercontent.com/harackgm/koshigaya-trout-bot/main/kositoralogo.jpg"
 
 # 6ジャンルデザイン設定
@@ -162,10 +162,28 @@ def extract_items_from_html(html_content):
                 'title': cleaned_title,
                 'raw_title': full_text,
                 'url': item_url,
-                'image_url': DEFAULT_IMAGE_URL
+                'image_url': DEFAULT_IMAGE_URL,
+                'price': '価格情報なし'
             })
             
     return raw_items
+
+
+def extract_price_from_detail(soup):
+    """商品詳細HTMLから価格（税込）を抽出するロジック"""
+    text = soup.get_text()
+    
+    # パターン1: 「15,000円(税込16,500円)」形式
+    m1 = re.search(r'[\d,]+円\s*\(税込[\d,]+円\)', text)
+    if m1:
+        return m1.group(0).replace(' ', '')
+        
+    # パターン2: 「16,500円(税込)」または 単純な「16,500円」形式
+    m2 = re.search(r'[\d,]+円\s*\(税込\)|[\d,]+円', text)
+    if m2:
+        return m2.group(0).replace(' ', '')
+        
+    return '価格: 要確認'
 
 
 def create_flex_carousel(items_chunk):
@@ -201,6 +219,14 @@ def create_flex_carousel(items_chunk):
                         "wrap": True,
                         "maxLines": 3,
                         "margin": "xs"
+                    },
+                    {
+                        "type": "text",
+                        "text": f"価格: {item.get('price', '-')}",
+                        "weight": "bold",
+                        "size": "sm",
+                        "color": "#272727",
+                        "margin": "sm"
                     }
                 ]
             },
@@ -321,13 +347,19 @@ def main():
             browser.close()
             return
 
-        # 未通知商品のみ詳細ページへアクセス
-        print(f"{len(new_items)}件の新着を検知。画像を取得します...")
+        # 未通知商品のみ詳細ページへアクセス（画像と価格を同時取得）
+        print(f"{len(new_items)}件の新着を検知。画像と価格を取得します...")
         for item in new_items:
             img_url = DEFAULT_IMAGE_URL
+            price_str = "価格: 要確認"
             try:
                 page.goto(item['url'], wait_until="domcontentloaded", timeout=20000)
                 detail_soup = BeautifulSoup(page.content(), 'html.parser')
+                
+                # 価格の抽出
+                price_str = extract_price_from_detail(detail_soup)
+                
+                # 画像の抽出
                 for img in detail_soup.find_all('img', src=True):
                     src = img['src']
                     if any(ex in src.lower() for ex in ['blank.gif', 'spacer.gif', 'logo', 'banner', 'btn', 'cart', 'header', 'footer']):
@@ -336,8 +368,10 @@ def main():
                     if any(kw in src.lower() for kw in ['upload', 'save_image', 'goods', 'product']):
                         break
             except Exception as e:
-                print(f"詳細ページの画像解析エラー ({item['url']}): {e}")
+                print(f"詳細ページの解析エラー ({item['url']}): {e}")
+                
             item['image_url'] = force_https_url(img_url)
+            item['price'] = price_str
             
         browser.close()
 
