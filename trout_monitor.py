@@ -68,9 +68,17 @@ def clean_title(title_text):
 
 
 def force_https_url(url):
+    """壊れたURL（https://www.https://...等）を自動修正する堅牢ロジック"""
     if not url:
         return TARGET_URL
     full_url = url.strip()
+
+    # サイト側のミスによる壊れたURLの修復処理
+    pids = re.findall(r'pid=(\d+)', full_url)
+    if pids and ('https://www.https://' in full_url or full_url.count('http') > 1):
+        valid_pid = pids[-1]  # 正確な末尾のpidを取得
+        return f"https://www.area-island.com/?pid={valid_pid}"
+
     if full_url.startswith("http://"):
         return full_url.replace("http://", "https://", 1)
     if not full_url.startswith("http"):
@@ -246,7 +254,6 @@ def send_line_flex_messages(items):
         # エラー発生時の判定
         if res.status_code != 200:
             res_text = res.text.lower()
-            # 200通超過時、あるいは上限に起因するレスポンスの場合に指定ログを出力
             if res.status_code in [400, 429] and any(kw in res_text for kw in ['limit', 'quota', 'exceeded']):
                 print("[ERROR] 今月分のLINE通知上限（200通）に到達しました。")
             else:
