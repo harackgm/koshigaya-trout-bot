@@ -18,7 +18,9 @@ CAROUSEL_CHUNK_SIZE = 5  # カルーセル1通知あたりの最大商品数
 
 LINE_CHANNEL_ACCESS_TOKEN = os.environ.get("LINE_CHANNEL_ACCESS_TOKEN", "")
 LINE_USER_ID = os.environ.get("LINE_USER_ID", "")
-DEFAULT_IMAGE_URL = "https://images.unsplash.com/photo-1544551763-46a013bb70d5?w=600&auto=format&fit=crop"
+
+# 【更新】画像取得失敗時の予備画像URL（GitHubリポジトリ上のロゴ画像）
+DEFAULT_IMAGE_URL = "https://raw.githubusercontent.com/harackgm/koshigaya-trout-bot/main/default_logo.jpg"
 
 # 6ジャンルデザイン設定
 GENRE_CONFIG = [
