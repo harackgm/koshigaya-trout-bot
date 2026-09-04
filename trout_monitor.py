@@ -155,6 +155,10 @@ def extract_items_from_html(html_content):
         cleaned_title = clean_title(full_text)
         item_id = hashlib.md5(f"{item_url}_{cleaned_title}".encode('utf-8')).hexdigest()
 
+        # 【安全対策1】一回の巡回内で同一URL（同一商品）が複数箇所にあった場合はスキップ
+        if any(i['url'] == item_url for i in raw_items):
+            continue
+
         if not any(i['item_id'] == item_id for i in raw_items):
             raw_items.append({
                 'item_id': item_id,
@@ -173,12 +177,10 @@ def extract_price_from_detail(soup):
     """商品詳細HTMLから価格（税込）を抽出するロジック"""
     text = soup.get_text()
     
-    # パターン1: 「15,000円(税込16,500円)」形式
     m1 = re.search(r'[\d,]+円\s*\(税込[\d,]+円\)', text)
     if m1:
         return m1.group(0).replace(' ', '')
         
-    # パターン2: 「16,500円(税込)」または 単純な「16,500円」形式
     m2 = re.search(r'[\d,]+円\s*\(税込\)|[\d,]+円', text)
     if m2:
         return m2.group(0).replace(' ', '')
@@ -260,7 +262,6 @@ def create_flex_carousel(items_chunk):
 
 
 def send_line_flex_messages(items):
-    """5件ずつのブロックに区切ってLINE送信（上限エラー判定を追加）"""
     if not LINE_CHANNEL_ACCESS_TOKEN or not LINE_USER_ID:
         print("エラー: LINEのアクセス情報が設定されていません。")
         return False
@@ -279,7 +280,6 @@ def send_line_flex_messages(items):
         }
         res = requests.post(url, headers=headers, json=payload, timeout=10)
         
-        # エラー発生時の判定
         if res.status_code != 200:
             res_text = res.text.lower()
             if res.status_code in [400, 429] and any(kw in res_text for kw in ['limit', 'quota', 'exceeded']):
@@ -329,7 +329,8 @@ def main():
         cursor = conn.cursor()
         new_items = []
         for item in raw_items:
-            cursor.execute(f"SELECT 1 FROM {TABLE_NAME} WHERE item_id = ?", (item['item_id'],))
+            # 【安全対策2】item_idだけでなく、過去に登録済みの URL であるかも判定して2重通知を遮断
+            cursor.execute(f"SELECT 1 FROM {TABLE_NAME} WHERE item_id = ? OR url = ?", (item['item_id'], item['url']))
             if not cursor.fetchone():
                 new_items.append(item)
         conn.close()
@@ -356,10 +357,8 @@ def main():
                 page.goto(item['url'], wait_until="domcontentloaded", timeout=20000)
                 detail_soup = BeautifulSoup(page.content(), 'html.parser')
                 
-                # 価格の抽出
                 price_str = extract_price_from_detail(detail_soup)
                 
-                # 画像の抽出
                 for img in detail_soup.find_all('img', src=True):
                     src = img['src']
                     if any(ex in src.lower() for ex in ['blank.gif', 'spacer.gif', 'logo', 'banner', 'btn', 'cart', 'header', 'footer']):
