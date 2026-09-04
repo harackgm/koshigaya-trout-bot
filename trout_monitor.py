@@ -155,7 +155,7 @@ def extract_items_from_html(html_content):
         cleaned_title = clean_title(full_text)
         item_id = hashlib.md5(f"{item_url}_{cleaned_title}".encode('utf-8')).hexdigest()
 
-        # 【安全対策1】一回の巡回内で同一URL（同一商品）が複数箇所にあった場合はスキップ
+        # 【同時重複カット】1回の巡回の中で同じURLが存在する場合は最初に出てきた1件のみを採用
         if any(i['url'] == item_url for i in raw_items):
             continue
 
@@ -329,8 +329,8 @@ def main():
         cursor = conn.cursor()
         new_items = []
         for item in raw_items:
-            # 【安全対策2】item_idだけでなく、過去に登録済みの URL であるかも判定して2重通知を遮断
-            cursor.execute(f"SELECT 1 FROM {TABLE_NAME} WHERE item_id = ? OR url = ?", (item['item_id'], item['url']))
+            # item_id（URL+タイトル）でDB照合（時間差で新テキストで掲載された場合は新着として判定）
+            cursor.execute(f"SELECT 1 FROM {TABLE_NAME} WHERE item_id = ?", (item['item_id'],))
             if not cursor.fetchone():
                 new_items.append(item)
         conn.close()
