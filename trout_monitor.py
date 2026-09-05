@@ -19,8 +19,11 @@ CAROUSEL_CHUNK_SIZE = 5  # カルーセル1通知あたりの最大商品数
 LINE_CHANNEL_ACCESS_TOKEN = os.environ.get("LINE_CHANNEL_ACCESS_TOKEN", "")
 LINE_USER_ID = os.environ.get("LINE_USER_ID", "")
 
-# 画像取得失敗時の予備画像URL（GitHubリポジトリ上のロゴ画像）
+# 画像取得失敗時の予備画像URL
 DEFAULT_IMAGE_URL = "https://raw.githubusercontent.com/harackgm/koshigaya-trout-bot/main/kositoralogo.jpg"
+
+# 【追加】カード上部（セル上）に表示するロゴ画像URL
+HEADER_LOGO_URL = "https://raw.githubusercontent.com/harackgm/koshigaya-trout-bot/main/kosigayalogo01.png"
 
 # 6ジャンルデザイン設定
 GENRE_CONFIG = [
@@ -174,7 +177,6 @@ def extract_items_from_html(html_content):
 
 
 def extract_price_from_detail(soup):
-    """商品詳細HTMLから価格（税込）を抽出するロジック"""
     text = soup.get_text()
     
     m1 = re.search(r'[\d,]+円\s*\(税込[\d,]+円\)', text)
@@ -195,6 +197,20 @@ def create_flex_carousel(items_chunk):
 
         bubble = {
             "type": "bubble",
+            "header": {
+                "type": "box",
+                "layout": "vertical",
+                "paddingAll": "sm",
+                "contents": [
+                    {
+                        "type": "image",
+                        "url": HEADER_LOGO_URL,
+                        "size": "full",
+                        "aspectMode": "fit",
+                        "aspectRatio": "20:5"
+                    }
+                ]
+            },
             "hero": {
                 "type": "image",
                 "url": item['image_url'],
@@ -329,7 +345,6 @@ def main():
         cursor = conn.cursor()
         new_items = []
         for item in raw_items:
-            # item_id（URL+タイトル）でDB照合（時間差で新テキストで掲載された場合は新着として判定）
             cursor.execute(f"SELECT 1 FROM {TABLE_NAME} WHERE item_id = ?", (item['item_id'],))
             if not cursor.fetchone():
                 new_items.append(item)
