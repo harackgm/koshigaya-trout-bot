@@ -22,7 +22,7 @@ LINE_USER_ID = os.environ.get("LINE_USER_ID", "")
 # 画像取得失敗時の予備画像URL
 DEFAULT_IMAGE_URL = "https://raw.githubusercontent.com/harackgm/koshigaya-trout-bot/main/kositoralogo.jpg"
 
-# 【追加】カード上部（セル上）に表示するロゴ画像URL
+# カード上部（セル上）に表示するロゴ画像URL
 HEADER_LOGO_URL = "https://raw.githubusercontent.com/harackgm/koshigaya-trout-bot/main/kosigayalogo01.png"
 
 # 6ジャンルデザイン設定
@@ -216,7 +216,7 @@ def create_flex_carousel(items_chunk):
                 "url": item['image_url'],
                 "size": "full",
                 "aspectRatio": "20:13",
-                "aspectMode": "cover"
+                "aspectMode": "fit"  # 【変更】coverからfitに変更し、見切れを防ぎ全体を納める
             },
             "body": {
                 "type": "box",
